@@ -32,7 +32,7 @@
 
 ### Taskmaster
 
-- [ ] break down query
+- [x] break down query
 - [ ] figure out what is needed (retrieval/report/strategize)
 - [ ] cyclic execution of tasks till completion
 
@@ -41,6 +41,7 @@
 - [ ] evaluate if task has been completed
 
 ### Pinpointer
+
 Allows for models to retrieve session information easily - stores session data as a json file that is a serialized python dict, each object has a name, description and type (types allow for different types of summarization, eg semantic summarization with llm for textual data vs summary statistics for timeseries)
 
 - [ ] create tools for listing, retrieval, summarization
