@@ -32,7 +32,7 @@
 
 ### Taskmaster
 
-- [x] break down query
+- [ ] break down query
 - [ ] figure out what is needed (retrieval/report/strategize)
 - [ ] cyclic execution of tasks till completion
 
