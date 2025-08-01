@@ -138,39 +138,6 @@ def tool_get_FRED_macro_as_observed(series_id: str) -> dict:
         return df_data.to_dict(orient='records')
     return df_data
 
-class PythonRunner:
-    def __init__(self, preload: dict = None):
-        self.locals = preload or {}
-
-    def run(self, code: str) -> any:
-        try:
-            exec(code, {}, self.locals)
-        except Exception as e:
-            return f"Error: {e}"
-        return self.locals
-
-def tool_run_strategy(data: dict, code: str) -> dict:
-    """
-    Run Python code that uses the provided data dictionary to implement a trading strategy. 
-    Input data (as dict) and a python strategy that uses the data, returns the statistics of the strategy or an error.
-    """
-    # Convert dict to DataFrame for strategy execution
-    df_data = pd.DataFrame(data)
-    result = PythonRunner({'data': df_data}).run(code)
-    
-    # Convert any DataFrame results back to dict
-    if isinstance(result, dict):
-        converted_result = {}
-        for key, value in result.items():
-            if isinstance(value, pd.DataFrame):
-                converted_result[key] = value.to_dict(orient='records')
-            elif isinstance(value, pd.Series):
-                converted_result[key] = value.to_list()
-            else:
-                converted_result[key] = value
-        return converted_result
-    return result
-
 def tool_analyze_strategy_returns(returns: list) -> dict:
     """
     Takes in returns of a strategy (as list) and returns sharpe ratio, win rate, max drawdown and cagr 

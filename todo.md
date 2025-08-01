@@ -45,3 +45,9 @@
 Allows for models to retrieve session information easily - stores session data as a json file that is a serialized python dict, each object has a name, description and type (types allow for different types of summarization, eg semantic summarization with llm for textual data vs summary statistics for timeseries)
 
 - [ ] create tools for listing, retrieval, summarization
+
+## Tools
+
+### Trading Engine
+
+- [ ] create trading engine

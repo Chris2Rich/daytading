@@ -11,75 +11,156 @@ import datetime
 import pandas as pd
 import numpy as np
 import re
+
 # from retrieval.filerag import create_context, Chunk, metadata
 # context = create_context(datadir=Path("data/filings"), embeddings_dir=Path("data/embeddings"), should_embed=False)
 
-class NextStepType(TypedDict):
+@dataclass
+class RetrievalSteps:
+    RETRIEVE_MACROECONOMIC_DATA: bool = False
+    RETRIEVE_MARKET_DATA: bool = False
+    RETRIEVE_COMPANY_FUNDAMENTAL_DATA: bool = False
+    RETRIEVE_SEC_FILING_DATA: bool = False
+    SEARCH_NEWS: bool = False
+    SEARCH_INTERNET: bool = False
+
+@dataclass
+class StrategySteps:
+    DEVELOP_TRADING_STRATEGY: bool = False
+    BACKTEST_TRADING_STRATEGY: bool = False
+
+@dataclass
+class AnalysisSteps:
+    CALCULATE_FUNDAMENTAL_RATIOS: bool = False
+    CALCULATE_TIMESERIES_STATISTICS: bool = False
+
+@dataclass
+class ReportingSteps:
+    SUMMARIZE_FINDINGS: bool = False
+    CREATE_SHORT_REPORT: bool = False
+    CREATE_DETAILED_REPORT: bool = False
+
+@dataclass
+class SystemSteps:
+    EVALUATION_CHECKPOINT: bool = False
+
+def steps_to_list(steptype):
+    return list(steptype.__annotations__.keys())
+
+@dataclass
+class NextStepType:
     """Union of booleans representing the next steps to take based on query analysis"""
-    # Retrieval
-    RETRIEVE_MACROECONOMIC_DATA: bool
-    RETRIEVE_TRADING_DATA: bool
-    RETRIEVE_COMPANY_FUNDAMENTAL_DATA: bool
-    RETRIEVE_SEC_FILING_DATA: bool
-    SEARCH_INTERNET: bool
-
-    # Strategy
-    DEVELOP_STRATEGY: bool
-    BACKTEST_STRATEGY: bool
-
-    # Reporting
-    SUMMARIZE_FINDINGS: bool
-    CREATE_SHORT_REPORT: bool
-    CREATE_DETAILED_REPORT: bool
-
-    # System
-    EVALUATION_CHECKPOINT: bool
+    retrieval: RetrievalSteps
+    strategy: StrategySteps
+    analysis: AnalysisSteps
+    reporting: ReportingSteps
+    system: SystemSteps
+    
+    @classmethod
+    def get_all_step_names(cls, ignore: set = {}) -> List[str]:
+        """Get all possible step names from all group classes"""
+        all_steps = []
+        for field_name, field_type in cls.__annotations__.items():
+            if hasattr(field_type, '__annotations__') and field_type not in ignore:
+                all_steps.extend(field_type.__annotations__.keys())
+        return all_steps
+    
+    @classmethod
+    def from_step_list(cls, steps_list: List[str]) -> 'NextStepType':
+        """Create NextStepType from a list of step names"""
+        retrieval = RetrievalSteps()
+        strategy = StrategySteps() 
+        analysis = AnalysisSteps()
+        reporting = ReportingSteps()
+        system = SystemSteps()
+        
+        step_groups = {
+            'retrieval': retrieval,
+            'strategy': strategy,
+            'analysis': analysis,
+            'reporting': reporting,
+            'system': system
+        }
+        
+        for step in steps_list:
+            step = step.strip().upper()
+            for group_name, group_obj in step_groups.items():
+                if hasattr(group_obj, step):
+                    setattr(group_obj, step, True)
+                    break
+        
+        return cls(retrieval=retrieval, strategy=strategy, analysis=analysis, reporting=reporting, system=system)
+    
+    def get_active_steps(self) -> List[str]:
+        """Get list of all active steps"""
+        active_steps = []
+        for field_name, field_type in self.__annotations__.items():
+            group_obj = getattr(self, field_name)
+            if hasattr(field_type, '__annotations__'):
+                for step_name in field_type.__annotations__.keys():
+                    if getattr(group_obj, step_name, False):
+                        active_steps.append(step_name)
+        return active_steps
 
 class Orchestrator():
     def __init__(self, model: str = "deepseek-r1-distill-llama-70b"):
-        self.lm = dspy.LM(model,  api_key=os.environ.get("GROQ_TOKEN_DAYTADING"),  api_base="https://api.groq.com/openai/v1/chat/completions", temperature=1.0, max_tokens=4000, stop=None, cache=False, cache_in_memory=False)
+        self.lm = dspy.LM(model, api_key=os.environ.get("GROQ_TOKEN_DAYTADING"), api_base="https://api.groq.com/openai/v1/chat/completions", temperature=0.6, max_tokens=4000, stop=None, cache=False, cache_in_memory=False)
         dspy.configure(lm=self.lm)
-        
+    
     def analyze_query(self, query: str) -> List[NextStepType]:
-        """Break down query and figure out what is needed"""
-        
         class QueryAnalysis(dspy.Signature):
-            """Analyze a query and determine what steps are needed from the available options."""
+            """Analyze a query step-by-step to determine the complete workflow needed."""
+            
             query = dspy.InputField()
+            end_goal = dspy.OutputField(
+                desc=f"What is the ultimate goal? Consider what type of report is needed from: {steps_to_list(ReportingSteps)} and if any type of modelling should be done."
+                "Max 100 words"
+            )
+            data_sources_needed = dspy.OutputField(
+                desc=f"What data sources are required? Consider: {steps_to_list(RetrievalSteps)}"
+                "Max 200 words"
+            )
+            analysis_type = dspy.OutputField(
+                desc=f"What analysis steps are needed? Consider: {steps_to_list(AnalysisSteps)}"
+                "Max 200 words"
+            )
+            strategy_requirements = dspy.OutputField(
+                desc=f"What strategy steps are needed? Consider: {steps_to_list(StrategySteps)}"
+                "Max 400 words"
+            )
+            report_complexity = dspy.OutputField(
+                desc=f"What report steps are needed: Consider {steps_to_list(ReportingSteps)}"
+                "Max 100 words"
+            )
+            workflow_reasoning = dspy.OutputField(
+                desc=f"What is the logical order of steps"
+                "Max 100 words"
+            )
             next_steps = dspy.OutputField(
-            desc="Provide a comma-separated list of next steps. "
-                "Each item must be one of the following exactly: "
-                f"{list(filter(None, [i if i != 'EVALUATION_CHECKPOINT' else None for i in NextStepType.__annotations__.keys()]))}. "
-                "Do not include anything else."
-                "Order each element in the order that the task should be done."
-                "Think out why each step is needed and the consider the entire workflow before responding."
-                "Ensure you don't forget steps."
-                "Always end with some type of report. Note that CREATE_DETAILED_REPORT is time consuming and could be excessive for simple questions or processes."
-                "Consider any potentially retrieved data in the context of the question, don't fetch uneccessary types of data (eg. fetching trading/filing data when answering a simple macro question)."
-                "Create the simplest list of steps possible, the list will be modified or added to during checkpoints if neccessary."
-                "Make sure to follow all rules specified"
+                desc=f"Final comma-separated workflow from: {NextStepType.get_all_step_names()}. "
+                "Order: data retrieval -> analysis -> strategy (if needed) -> reporting"
             )
         
         analyzer = dspy.Predict(QueryAnalysis)
         result = analyzer(query=query)
+        steps_list = [s.strip() for s in str(getattr(result, 'next_steps', '')).upper().split(',') if s.strip()]
+        
+        return NextStepType.from_step_list(steps_list)
 
-        return [s.strip() for s in str(getattr(result, 'next_steps', '')).upper().split(',') if s.strip() in NextStepType.__annotations__.keys()]
-
-# Example usage
 if __name__ == "__main__":
-    orchestrator = Orchestrator("meta-llama/llama-4-maverick-17b-128e-instruct")
-    
-    # Test query analysis
+    # orchestrator = Orchestrator("meta-llama/llama-4-maverick-17b-128e-instruct")
+    orchestrator = Orchestrator()
+
     test_queries = [
         "What are the key financial metrics for AAPL in Q4?",
-        "Create a trading strategy for tech stocks", 
+        "Create a trading strategy for tech stocks",
         "Search for recent news about inflation",
         "Generate a report on overall market volatility and it's impact on options prices",
-        "Investigate the market dynamics of IV crush around earnings and create a strategy that implements this tune the hyperparameters and then create a report."
+        "Investigate the market dynamics of IV crush around earnings and create a strategy that implements this tune the hyperparameters and then create a report.",
+        "Average inflation rate of TTM",
     ]
-    
+
     for query in test_queries:
         print(f"\nQuery: {query}")
-        for i in range(3):
-            steps = orchestrator.analyze_query(query)
-            print(f"Next Steps: {[s for s in steps]}")
+        steps = orchestrator.analyze_query(query)
+        print(f"Next Steps: {steps.get_active_steps()}")
