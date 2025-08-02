@@ -1,4 +1,7 @@
+import argparse
+import traceback
 import os
+import sys
 import requests
 from typing import Dict, List, Any, Tuple, Optional, Callable, Union
 from pathlib import Path
@@ -17,12 +20,13 @@ import re
 
 @dataclass
 class RetrievalSteps:
+    SEARCH_INTERNET: bool = False
+    SEARCH_NEWS: bool = False
+
     RETRIEVE_MACROECONOMIC_DATA: bool = False
-    RETRIEVE_MARKET_DATA: bool = False
+    RETRIEVE_MARKET_TRADING_DATA: bool = False
     RETRIEVE_COMPANY_FUNDAMENTAL_DATA: bool = False
     RETRIEVE_SEC_FILING_DATA: bool = False
-    SEARCH_NEWS: bool = False
-    SEARCH_INTERNET: bool = False
 
 @dataclass
 class StrategySteps:
@@ -48,7 +52,7 @@ def steps_to_list(steptype):
     return list(steptype.__annotations__.keys())
 
 @dataclass
-class NextStepType:
+class StepUnion:
     """Union of booleans representing the next steps to take based on query analysis"""
     retrieval: RetrievalSteps
     strategy: StrategySteps
@@ -66,8 +70,8 @@ class NextStepType:
         return all_steps
     
     @classmethod
-    def from_step_list(cls, steps_list: List[str]) -> 'NextStepType':
-        """Create NextStepType from a list of step names"""
+    def from_step_list(cls, steps_list: List[str]) -> 'StepUnion':
+        """Create StepUnion from a list of step names"""
         retrieval = RetrievalSteps()
         strategy = StrategySteps() 
         analysis = AnalysisSteps()
@@ -103,64 +107,63 @@ class NextStepType:
         return active_steps
 
 class Orchestrator():
-    def __init__(self, model: str = "deepseek-r1-distill-llama-70b"):
-        self.lm = dspy.LM(model, api_key=os.environ.get("GROQ_TOKEN_DAYTADING"), api_base="https://api.groq.com/openai/v1/chat/completions", temperature=0.6, max_tokens=4000, stop=None, cache=False, cache_in_memory=False)
+    def __init__(self, model: str = "deepseek-r1-distill-llama-70b", temperature: float = 0.6):
+        self.lm = dspy.LM(model, api_key=os.environ.get("GROQ_TOKEN_DAYTADING"), api_base="https://api.groq.com/openai/v1/chat/completions", temperature=temperature, max_tokens=4000, stop=None, cache=False, cache_in_memory=False)
         dspy.configure(lm=self.lm)
     
-    def analyze_query(self, query: str) -> List[NextStepType]:
-        class QueryAnalysis(dspy.Signature):
-            """Analyze a query step-by-step to determine the complete workflow needed."""
+    def analyze_query(self, query: str, debug: bool = False) -> List:
+        class FinancialQueryAnalysis(dspy.Signature):
+            """
+            Determine minimal workflow steps for financial analysis tasks.
+            """
             
             query = dspy.InputField()
-            end_goal = dspy.OutputField(
-                desc=f"What is the ultimate goal? Consider what type of report is needed from: {steps_to_list(ReportingSteps)} and if any type of modelling should be done."
-                "Max 100 words"
+            query_type = dspy.OutputField(
+                desc=f"financial query -> analyze, strategize, explain"
+            )
+            report_format = dspy.OutputField(
+                desc=f"financial query -> [report format in : {steps_to_list(ReportingSteps)}]"
             )
             data_sources_needed = dspy.OutputField(
-                desc=f"What data sources are required? Consider: {steps_to_list(RetrievalSteps)}"
-                "Max 200 words"
+                desc=f"financial query, query type -> (any amount) [data source in : {steps_to_list(RetrievalSteps)}]"
             )
             analysis_type = dspy.OutputField(
-                desc=f"What analysis steps are needed? Consider: {steps_to_list(AnalysisSteps)}"
-                "Max 200 words"
+                desc=f"financial query, query type -> (any amount) [analysis type in : {steps_to_list(AnalysisSteps)}]"
             )
             strategy_requirements = dspy.OutputField(
-                desc=f"What strategy steps are needed? Consider: {steps_to_list(StrategySteps)}"
-                "Max 400 words"
-            )
-            report_complexity = dspy.OutputField(
-                desc=f"What report steps are needed: Consider {steps_to_list(ReportingSteps)}"
-                "Max 100 words"
+                desc=f"financial query, query type -> (any amount) [strategy step in : {steps_to_list(StrategySteps)}."
+                "if backtest and develop not precedent -> [develop_strategy, backtest_strategy]"
             )
             workflow_reasoning = dspy.OutputField(
-                desc=f"What is the logical order of steps"
-                "Max 100 words"
+                desc=f"financial query, query type, processes -> financial workflow"
             )
-            next_steps = dspy.OutputField(
-                desc=f"Final comma-separated workflow from: {NextStepType.get_all_step_names()}. "
-                "Order: data retrieval -> analysis -> strategy (if needed) -> reporting"
+            workflow_simplifier = dspy.OutputField(
+                desc=f"financial query, query type, superfluous financial workflow -> neccessary financial workflow"
+            )
+            suggested_workflow = dspy.OutputField(
+                desc=f"Final comma-separated workflow from: {StepUnion.get_all_step_names({SystemSteps})}"
+                "data retrieval -> analysis -> strategy -> reporting"
             )
         
-        analyzer = dspy.Predict(QueryAnalysis)
+        analyzer = dspy.ChainOfThought(FinancialQueryAnalysis)
         result = analyzer(query=query)
-        steps_list = [s.strip() for s in str(getattr(result, 'next_steps', '')).upper().split(',') if s.strip()]
+        steps_list = [s.strip() for s in str(getattr(result, 'suggested_workflow', '')).upper().split(',') if s.strip()]
         
-        return NextStepType.from_step_list(steps_list)
+        if debug:
+            print(result)
+        return steps_list
 
 if __name__ == "__main__":
-    # orchestrator = Orchestrator("meta-llama/llama-4-maverick-17b-128e-instruct")
-    orchestrator = Orchestrator()
+    try:
+        parser = argparse.ArgumentParser(description="LLM")
+        parser.add_argument("query", help="Query")
+        parser.add_argument("-db", "--debug", help="Debug Mode", default="False")
+        args = parser.parse_args()
 
-    test_queries = [
-        "What are the key financial metrics for AAPL in Q4?",
-        "Create a trading strategy for tech stocks",
-        "Search for recent news about inflation",
-        "Generate a report on overall market volatility and it's impact on options prices",
-        "Investigate the market dynamics of IV crush around earnings and create a strategy that implements this tune the hyperparameters and then create a report.",
-        "Average inflation rate of TTM",
-    ]
-
-    for query in test_queries:
-        print(f"\nQuery: {query}")
-        steps = orchestrator.analyze_query(query)
-        print(f"Next Steps: {steps.get_active_steps()}")
+        orchestrator = Orchestrator(temperature=0)
+        steps = orchestrator.analyze_query(args.query, args.debug.lower() == "true")
+        print(f"Next Steps: {steps}")
+    except:
+        traceback.print_exc()
+    finally:
+        sys.exit()
