@@ -18,6 +18,28 @@ import re
 # from retrieval.filerag import create_context, Chunk, metadata
 # context = create_context(datadir=Path("data/filings"), embeddings_dir=Path("data/embeddings"), should_embed=False)
 
+routers = {
+    "OPENROUTER" : {
+        "base_url": "https://openrouter.ai/api/v1/chat/completions",
+        "api_key": os.environ["OPENROUTER_TOKEN_DAYTADING"],
+        "models": {
+            "kimik2": "openrouter/moonshotai/kimi-k2:free", 
+            "horizonbeta": "openrouter/openrouter/horizon-beta", 
+            "quen3coder30b": "openrouter/qwen/qwen3-coder:free", 
+            "glm4.5air": "openrouter/z-ai/glm-4.5-air:free", 
+            "hunyuana13b": "openrouter/tencent/hunyuan-a13b-instruct:free", 
+            "r1t2chimera" : "openrouter/tngtech/deepseek-r1t2-chimera:free",
+        }
+    },
+    "GROQ" : {
+        "base_url": "https://api.groq.com/openai/v1/chat/completions",
+        "api_key": os.environ["GROQ_TOKEN_DAYTADING"],
+        "models": {
+            "llama70bdsr1": "deepseek-r1-distill-llama-70b"
+        }
+    }
+}
+
 @dataclass
 class RetrievalSteps:
     SEARCH_INTERNET: bool = False
@@ -107,8 +129,9 @@ class StepUnion:
         return active_steps
 
 class Orchestrator():
-    def __init__(self, model: str = "deepseek-r1-distill-llama-70b", temperature: float = 0.6):
-        self.lm = dspy.LM(model, api_key=os.environ.get("GROQ_TOKEN_DAYTADING"), api_base="https://api.groq.com/openai/v1/chat/completions", temperature=temperature, max_tokens=4000, stop=None, cache=False, cache_in_memory=False)
+    def __init__(self, model: str = routers["OPENROUTER"]["models"]["kimik2"], temperature: float = 0.6, provider: str = "OPENROUTER"):
+
+        self.lm = dspy.LM(model, api_key=routers[provider]["api_key"], api_base=routers[provider]["base_url"], temperature=temperature, max_tokens=4000, stop=None, cache=False, cache_in_memory=False)
         dspy.configure(lm=self.lm)
     
     def analyze_query(self, query: str, debug: bool = False) -> List:
