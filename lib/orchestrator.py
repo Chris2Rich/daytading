@@ -23,12 +23,13 @@ routers = {
         "base_url": "https://openrouter.ai/api/v1/chat/completions",
         "api_key": os.environ["OPENROUTER_TOKEN_DAYTADING"],
         "models": {
-            "kimik2": "openrouter/moonshotai/kimi-k2:free", 
-            "horizonbeta": "openrouter/openrouter/horizon-beta", 
+            "kimik2": "openrouter/moonshotai/kimi-k2:free", # unstable with dspy
+            "horizonbeta": "openrouter/openrouter/horizon-beta",
             "quen3coder30b": "openrouter/qwen/qwen3-coder:free", 
             "glm4.5air": "openrouter/z-ai/glm-4.5-air:free", 
-            "hunyuana13b": "openrouter/tencent/hunyuan-a13b-instruct:free", 
+            "hunyuan13b": "openrouter/tencent/hunyuan-a13b-instruct:free", 
             "r1t2chimera" : "openrouter/tngtech/deepseek-r1t2-chimera:free",
+            "r10528" : "openrouter/deepseek/deepseek-r1-0528:free",
         }
     },
     "GROQ" : {
@@ -74,8 +75,7 @@ def steps_to_list(steptype):
     return list(steptype.__annotations__.keys())
 
 @dataclass
-class StepUnion:
-    """Union of booleans representing the next steps to take based on query analysis"""
+class StepTypeUnion:
     retrieval: RetrievalSteps
     strategy: StrategySteps
     analysis: AnalysisSteps
@@ -86,58 +86,23 @@ class StepUnion:
     def get_all_step_names(cls, ignore: set = {}) -> List[str]:
         """Get all possible step names from all group classes"""
         all_steps = []
-        for field_name, field_type in cls.__annotations__.items():
-            if hasattr(field_type, '__annotations__') and field_type not in ignore:
-                all_steps.extend(field_type.__annotations__.keys())
+        for _, field_type in cls.__annotations__.items():
+            if field_type not in ignore:
+                all_steps.extend(steps_to_list(field_type))
         return all_steps
-    
-    @classmethod
-    def from_step_list(cls, steps_list: List[str]) -> 'StepUnion':
-        """Create StepUnion from a list of step names"""
-        retrieval = RetrievalSteps()
-        strategy = StrategySteps() 
-        analysis = AnalysisSteps()
-        reporting = ReportingSteps()
-        system = SystemSteps()
-        
-        step_groups = {
-            'retrieval': retrieval,
-            'strategy': strategy,
-            'analysis': analysis,
-            'reporting': reporting,
-            'system': system
-        }
-        
-        for step in steps_list:
-            step = step.strip().upper()
-            for group_name, group_obj in step_groups.items():
-                if hasattr(group_obj, step):
-                    setattr(group_obj, step, True)
-                    break
-        
-        return cls(retrieval=retrieval, strategy=strategy, analysis=analysis, reporting=reporting, system=system)
-    
-    def get_active_steps(self) -> List[str]:
-        """Get list of all active steps"""
-        active_steps = []
-        for field_name, field_type in self.__annotations__.items():
-            group_obj = getattr(self, field_name)
-            if hasattr(field_type, '__annotations__'):
-                for step_name in field_type.__annotations__.keys():
-                    if getattr(group_obj, step_name, False):
-                        active_steps.append(step_name)
-        return active_steps
 
-class Orchestrator():
-    def __init__(self, model: str = routers["OPENROUTER"]["models"]["kimik2"], temperature: float = 0.6, provider: str = "OPENROUTER"):
+class LM_WRAPPER():
+    def __init__(self, model: str = routers["OPENROUTER"]["models"]["r10528"], temperature: float = 0.6, provider: str = "OPENROUTER"):
 
-        self.lm = dspy.LM(model, api_key=routers[provider]["api_key"], api_base=routers[provider]["base_url"], temperature=temperature, max_tokens=4000, stop=None, cache=False, cache_in_memory=False)
+        self.lm = dspy.LM(model, api_key=routers[provider]["api_key"], api_base=routers[provider]["base_url"], temperature=temperature, max_tokens=4000, stop=None, cache=False, cache_in_memory=False, extra_headers=(None if provider != "OPENROUTER" else {"HTTP-Referer": "https://nodomainyet.com","X-Title": "notitleyet"}))
         dspy.configure(lm=self.lm)
-    
-    def analyze_query(self, query: str, debug: bool = False) -> List:
+
+class Orchestrator(LM_WRAPPER):
+    def analyze_query(self, query: str, debug: bool = False) -> Dict:
         class FinancialQueryAnalysis(dspy.Signature):
             """
             Determine minimal workflow steps for financial analysis tasks.
+            Return in Dspy format.
             """
             
             query = dspy.InputField()
@@ -164,17 +129,49 @@ class Orchestrator():
                 desc=f"financial query, query type, superfluous financial workflow -> neccessary financial workflow"
             )
             suggested_workflow = dspy.OutputField(
-                desc=f"Final comma-separated workflow from: {StepUnion.get_all_step_names({SystemSteps})}"
+                desc=f"Final comma-separated workflow from: {StepTypeUnion.get_all_step_names({SystemSteps})}"
                 "data retrieval -> analysis -> strategy -> reporting"
             )
         
         analyzer = dspy.ChainOfThought(FinancialQueryAnalysis)
         result = analyzer(query=query)
         steps_list = [s.strip() for s in str(getattr(result, 'suggested_workflow', '')).upper().split(',') if s.strip()]
-        
+        reasoning = str(getattr(result, "reasoning", ""))
+
         if debug:
             print(result)
-        return steps_list
+        return {"steps": steps_list, "reasoning": reasoning}
+
+    def parameterize_query(self, query: str, steps: List[str], reasoning: str, debug: bool = False) -> Dict:
+        class FinancialQueryParameterizer(dspy.Signature):
+            """
+            Determine the correct parameters for each step.
+            Eg. the correct search strings for searches or most relevant ratios when calculating ratios.
+            Return in Dspy format.
+            """
+
+            query = dspy.InputField()
+            named_entities = dspy.OutputField(
+                desc=f"financial query -> (any amount) [named financial entities]"
+                "For internet and news searches"
+                "If empty then return ''"
+            )
+            named_assets = dspy.OutputField(
+                desc=f"financial query -> (any amount) [named assets]"
+                "For database searches"
+                "If empty then return ''"
+            )
+            named_concepts = dspy.OutputField(
+                desc=f"financial query -> (any amount) [named concepts]"
+                "For internet and news searches"
+                "If empty then return ''"
+            )
+        parameterizer = dspy.ChainOfThought(FinancialQueryParameterizer)
+        result = parameterizer(query=query)
+
+        if debug:
+            print(result)
+        return dict(result)
 
 if __name__ == "__main__":
     try:
@@ -184,8 +181,9 @@ if __name__ == "__main__":
         args = parser.parse_args()
 
         orchestrator = Orchestrator(temperature=0)
-        steps = orchestrator.analyze_query(args.query, args.debug.lower() == "true")
-        print(f"Next Steps: {steps}")
+        res_analyze = orchestrator.analyze_query(args.query, args.debug.lower() == "true")
+        res_parameterize = orchestrator.parameterize_query(args.query, res_analyze["steps"], res_analyze["reasoning"], args.debug.lower() == "true")
+        print(f"Steps: {res_analyze}\nParameters: {res_parameterize}")
     except:
         traceback.print_exc()
     finally:
