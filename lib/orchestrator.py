@@ -14,6 +14,7 @@ import datetime
 import pandas as pd
 import numpy as np
 import re
+import time
 
 # from retrieval.filerag import create_context, Chunk, metadata
 # context = create_context(datadir=Path("data/filings"), embeddings_dir=Path("data/embeddings"), should_embed=False)
@@ -153,7 +154,7 @@ class Orchestrator(LM_WRAPPER):
             query = dspy.InputField()
             named_entities = dspy.OutputField(
                 desc=f"financial query -> (any amount) [named financial entities]"
-                "For internet and news searches"
+                "For internet and news searches (corporations, government agencies)"
                 "If empty then return ''"
             )
             named_assets = dspy.OutputField(
@@ -166,6 +167,12 @@ class Orchestrator(LM_WRAPPER):
                 "For internet and news searches"
                 "If empty then return ''"
             )
+            if "SEARCH_INTERNET" in steps: search_internet_query = dspy.OutputField(desc=f"named_entities, named_assets, named_concepts, financial query -> (any amount) [internet search queries]""Comma seperated values")
+            if "SEARCH_NEWS" in steps: search_news_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [news search queries]""Comma seperated values")
+            # MACRO - TODO
+            if "RETRIEVE_MARKET_TRADING_DATA" in steps: market_trading_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [trading data queries]""Comma seperated values")
+            if "RETRIEVE_COMPANY_FUNDAMENTAL_DATA" in steps: company_fundamental_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [company fundamental data queries]""Comma seperated values")
+            if "RETRIEVE_SEC_FILING_DATA" in steps: sec_filings_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [sec filing queries]""Comma seperated values")
         parameterizer = dspy.ChainOfThought(FinancialQueryParameterizer)
         result = parameterizer(query=query)
 
@@ -180,10 +187,14 @@ if __name__ == "__main__":
         parser.add_argument("-db", "--debug", help="Debug Mode", default="False")
         args = parser.parse_args()
 
-        orchestrator = Orchestrator(temperature=0)
+        start = time.time_ns() // 1e6
+        orchestrator = Orchestrator(temperature=0, model=routers["OPENROUTER"]["models"]["hunyuan13b"])
+        print(f"Initialized orchestrator - {time.time_ns() // 1e6 - start}ms")
         res_analyze = orchestrator.analyze_query(args.query, args.debug.lower() == "true")
+        print(f"Analyzed Query - {time.time_ns() // 1e6 - start}ms")
         res_parameterize = orchestrator.parameterize_query(args.query, res_analyze["steps"], res_analyze["reasoning"], args.debug.lower() == "true")
-        print(f"Steps: {res_analyze}\nParameters: {res_parameterize}")
+        print(f"Parameterized Query - {time.time_ns() // 1e6 - start}ms")
+        print(f"Steps: {res_analyze['steps']}\nParameters: {dict((k, v) for k, v in res_parameterize.items() if k != 'reasoning' and v != str(chr(39)) * 2 )}")
     except:
         traceback.print_exc()
     finally:

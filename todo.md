@@ -33,7 +33,7 @@
 ### Taskmaster
 
 - [-] break down query
-- [ ] figure out what is needed (retrieval/report/strategize)
+- [-] figure out what is needed (retrieval/report/strategize)
 - [ ] cyclic execution of tasks till completion
 
 ### Evaluator
@@ -51,3 +51,7 @@ Allows for models to retrieve session information easily - stores session data a
 ### Trading Engine
 
 - [ ] create trading engine
+
+### Search
+
+- [ ] find a way to search efficiently
