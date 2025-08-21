@@ -32,8 +32,8 @@
 
 ### Taskmaster
 
-- [-] break down query
-- [-] figure out what is needed (retrieval/report/strategize)
+- [] get gemini to create pairs of query to workflow
+- [ ] figure out parameters for each function
 - [ ] cyclic execution of tasks till completion
 
 ### Evaluator

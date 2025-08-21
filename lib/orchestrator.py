@@ -96,76 +96,39 @@ class StepTypeUnion:
 class LM_WRAPPER():
     def __init__(self, model: str = routers["OPENROUTER"]["models"]["r10528"], temperature: float = 0.6, provider: str = "OPENROUTER"):
 
-        self.lm = dspy.LM(model, api_key=routers[provider]["api_key"], api_base=routers[provider]["base_url"], temperature=temperature, max_tokens=4000, stop=None, cache=False, cache_in_memory=False, extra_headers=(None if provider != "OPENROUTER" else {"HTTP-Referer": "https://nodomainyet.com","X-Title": "notitleyet"}))
+        self.lm = dspy.LM(model, api_key=routers[provider]["api_key"], api_base=routers[provider]["base_url"], temperature=temperature, max_tokens=4000, stop=None, cache=True, cache_in_memory=False, extra_headers=(None if provider != "OPENROUTER" else {"HTTP-Referer": "https://nodomainyet.com","X-Title": "notitleyet"}))
         dspy.configure(lm=self.lm)
 
 class Orchestrator(LM_WRAPPER):
-    def analyze_query(self, query: str, debug: bool = False) -> Dict:
-        class FinancialQueryAnalysis(dspy.Signature):
-            """
-            Determine minimal workflow steps for financial analysis tasks.
-            Return in Dspy format.
-            """
-            
-            query = dspy.InputField()
-            query_type = dspy.OutputField(
-                desc=f"financial query -> analyze, strategize, explain"
-            )
-            report_format = dspy.OutputField(
-                desc=f"financial query -> [report format in : {steps_to_list(ReportingSteps)}]"
-            )
-            data_sources_needed = dspy.OutputField(
-                desc=f"financial query, query type -> (any amount) [data source in : {steps_to_list(RetrievalSteps)}]"
-            )
-            analysis_type = dspy.OutputField(
-                desc=f"financial query, query type -> (any amount) [analysis type in : {steps_to_list(AnalysisSteps)}]"
-            )
-            strategy_requirements = dspy.OutputField(
-                desc=f"financial query, query type -> (any amount) [strategy step in : {steps_to_list(StrategySteps)}."
-                "if backtest and develop not precedent -> [develop_strategy, backtest_strategy]"
-            )
-            workflow_reasoning = dspy.OutputField(
-                desc=f"financial query, query type, processes -> financial workflow"
-            )
-            workflow_simplifier = dspy.OutputField(
-                desc=f"financial query, query type, superfluous financial workflow -> neccessary financial workflow"
-            )
-            suggested_workflow = dspy.OutputField(
-                desc=f"Final comma-separated workflow from: {StepTypeUnion.get_all_step_names({SystemSteps})}"
-                "data retrieval -> analysis -> strategy -> reporting"
-            )
-        
-        analyzer = dspy.ChainOfThought(FinancialQueryAnalysis)
-        result = analyzer(query=query)
-        steps_list = [s.strip() for s in str(getattr(result, 'suggested_workflow', '')).upper().split(',') if s.strip()]
-        reasoning = str(getattr(result, "reasoning", ""))
+    def query_to_steps(self, query: str, debug: bool = False) -> Dict:
+        return {"steps" : []}
 
-        if debug:
-            print(result)
-        return {"steps": steps_list, "reasoning": reasoning}
-
-    def parameterize_query(self, query: str, steps: List[str], reasoning: str, debug: bool = False) -> Dict:
+    def parameterize_query(self, query: str, steps: List[str], debug: bool = False) -> Dict:
         class FinancialQueryParameterizer(dspy.Signature):
             """
             Determine the correct parameters for each step.
             Eg. the correct search strings for searches or most relevant ratios when calculating ratios.
             Return in Dspy format.
+            Be terse.
             """
 
             query = dspy.InputField()
             named_entities = dspy.OutputField(
                 desc=f"financial query -> (any amount) [named financial entities]"
                 "For internet and news searches (corporations, government agencies)"
+                "Eg CERN, Columbia University, Lockheed Martin"
                 "If empty then return ''"
             )
             named_assets = dspy.OutputField(
                 desc=f"financial query -> (any amount) [named assets]"
                 "For database searches"
+                "Eg SPY, APPL, CPIAUCSL"
                 "If empty then return ''"
             )
             named_concepts = dspy.OutputField(
                 desc=f"financial query -> (any amount) [named concepts]"
                 "For internet and news searches"
+                "Specialist terms in industry and finance, eg. backwardation, semaglutide, quantum entanglement"
                 "If empty then return ''"
             )
             if "SEARCH_INTERNET" in steps: search_internet_query = dspy.OutputField(desc=f"named_entities, named_assets, named_concepts, financial query -> (any amount) [internet search queries]""Comma seperated values")
@@ -191,9 +154,9 @@ if __name__ == "__main__":
         start = time.time_ns() // 1e6
         orchestrator = Orchestrator(temperature=0, model=routers["OPENROUTER"]["models"]["hunyuan13b"])
         print(f"Initialized orchestrator - {time.time_ns() // 1e6 - start}ms")
-        res_analyze = orchestrator.analyze_query(args.query, args.debug.lower() == "true")
+        res_analyze = orchestrator.query_to_steps(args.query, args.debug.lower() == "true")
         print(f"Analyzed Query - {time.time_ns() // 1e6 - start}ms")
-        res_parameterize = orchestrator.parameterize_query(args.query, res_analyze["steps"], res_analyze["reasoning"], args.debug.lower() == "true")
+        res_parameterize = orchestrator.parameterize_query(args.query, res_analyze["steps"], args.debug.lower() == "true")
         print(f"Parameterized Query - {time.time_ns() // 1e6 - start}ms")
         print(f"Steps: {res_analyze['steps']}\nParameters: {dict((k, v) for k, v in res_parameterize.items() if k != 'reasoning' and v != str(chr(39)) * 2 )}")
     except:
