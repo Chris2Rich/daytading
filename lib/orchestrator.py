@@ -71,6 +71,8 @@ class ReportingSteps:
 
 @dataclass
 class SystemSteps:
+    BEGIN: bool = False
+    END: bool = False
     EVALUATION_CHECKPOINT: bool = False
 
 def steps_to_list(steptype):
