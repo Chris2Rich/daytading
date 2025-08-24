@@ -32,9 +32,13 @@
 
 ### Taskmaster
 
-- [] get gemini to create pairs of query to workflow
-- [ ] figure out parameters for each function
+- [x] figure out parameters for each function
 - [ ] cyclic execution of tasks till completion
+
+### Agents
+
+- [ ] create agent class - takes in instructions, creates final parameters and executes
+- [ ] implement the various agents that are needed
 
 ### Evaluator
 
@@ -55,3 +59,8 @@ Allows for models to retrieve session information easily - stores session data a
 ### Search
 
 - [ ] find a way to search efficiently
+
+## LONGTERM
+
+- [ ] create sequence to sequence model to turn queries into steps
+- [ ] semantic caching of requests for analyzer and parameterizer

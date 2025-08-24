@@ -102,10 +102,52 @@ class LM_WRAPPER():
         dspy.configure(lm=self.lm)
 
 class Orchestrator(LM_WRAPPER):
-    def query_to_steps(self, query: str, debug: bool = False) -> Dict:
-        return {"steps" : []}
+    def analyze_query(self, query: str, debug: bool = False) -> Dict:
+        class FinancialQueryAnalysis(dspy.Signature):
+            """
+            Determine minimal workflow steps for financial analysis tasks.
+            Return in Dspy format.
+            """
+            
+            query = dspy.InputField(desc="Original input query")
+            query_type = dspy.OutputField(
+                desc=f"financial query -> analyze, strategize, explain"
+            )
+            report_format = dspy.OutputField(
+                desc=f"financial query -> [report format in : {steps_to_list(ReportingSteps)}]"
+            )
+            data_sources_needed = dspy.OutputField(
+                desc=f"financial query, query type -> (any amount) [data source in : {steps_to_list(RetrievalSteps)}]"
+            )
+            analysis_type = dspy.OutputField(
+                desc=f"financial query, query type -> (any amount) [analysis type in : {steps_to_list(AnalysisSteps)}]"
+            )
+            strategy_requirements = dspy.OutputField(
+                desc=f"financial query, query type -> (any amount) [strategy step in : {steps_to_list(StrategySteps)}."
+                "if backtest and develop not precedent -> [develop_strategy, backtest_strategy]"
+            )
+            workflow_reasoning = dspy.OutputField(
+                desc=f"financial query, query type, processes -> financial workflow"
+            )
+            workflow_simplifier = dspy.OutputField(
+                desc=f"financial query, query type, superfluous financial workflow -> neccessary financial workflow"
+            )
+            suggested_workflow = dspy.OutputField(
+                desc=f"Final comma-separated workflow from: {StepTypeUnion.get_all_step_names({SystemSteps})}"
+                "data retrieval -> analysis -> strategy -> reporting"
+            )
+        
+        analyzer = dspy.ChainOfThought(FinancialQueryAnalysis)
+        result = analyzer(query=query)
+        steps_list = [s.strip() for s in str(getattr(result, 'suggested_workflow', '')).upper().split(',') if s.strip()]
+        reasoning = str(getattr(result, "reasoning", ""))
 
-    def parameterize_query(self, query: str, steps: List[str], debug: bool = False) -> Dict:
+        if debug:
+            print(result)
+        return {"steps": steps_list, "reasoning": reasoning}
+
+
+    def parameterize_query(self, query: str, steps_v: List[str], reasoning: str, debug: bool = False) -> Dict:
         class FinancialQueryParameterizer(dspy.Signature):
             """
             Determine the correct parameters for each step.
@@ -114,17 +156,19 @@ class Orchestrator(LM_WRAPPER):
             Be terse.
             """
 
-            query = dspy.InputField()
-            named_entities = dspy.OutputField(
-                desc=f"financial query -> (any amount) [named financial entities]"
+            query = dspy.InputField(desc="Original input query")
+            reasoning = dspy.InputField(desc="Reasoning behind workflow steps")
+            steps = dspy.InputField(desc="List of required workflow steps")
+            named_organizations = dspy.OutputField(
+                desc=f"financial query -> (any amount) [named organizations]"
                 "For internet and news searches (corporations, government agencies)"
                 "Eg CERN, Columbia University, Lockheed Martin"
                 "If empty then return ''"
             )
-            named_assets = dspy.OutputField(
-                desc=f"financial query -> (any amount) [named assets]"
+            named_stocks = dspy.OutputField(
+                desc=f"financial query -> (any amount) [named stocks]"
                 "For database searches"
-                "Eg SPY, APPL, CPIAUCSL"
+                "Eg SPY, APPL, GOOG"
                 "If empty then return ''"
             )
             named_concepts = dspy.OutputField(
@@ -133,18 +177,18 @@ class Orchestrator(LM_WRAPPER):
                 "Specialist terms in industry and finance, eg. backwardation, semaglutide, quantum entanglement"
                 "If empty then return ''"
             )
-            if "SEARCH_INTERNET" in steps: search_internet_query = dspy.OutputField(desc=f"named_entities, named_assets, named_concepts, financial query -> (any amount) [internet search queries]""Comma seperated values")
-            if "SEARCH_NEWS" in steps: search_news_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [news search queries]""Comma seperated values")
+            if "SEARCH_INTERNET" in steps_v: search_internet_query = dspy.OutputField(desc=f"named_entities, named_assets, named_concepts, financial query -> (any amount) [internet search queries]""Comma seperated values")
+            if "SEARCH_NEWS" in steps_v: search_news_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [news search queries]""Comma seperated values")
             # MACRO - TODO
-            if "RETRIEVE_MARKET_TRADING_DATA" in steps: market_trading_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [trading data queries]""Comma seperated values")
-            if "RETRIEVE_COMPANY_FUNDAMENTAL_DATA" in steps: company_fundamental_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [company fundamental data queries]""Comma seperated values")
-            if "RETRIEVE_SEC_FILING_DATA" in steps: sec_filings_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [sec filing queries]""Comma seperated values")
+            if "RETRIEVE_MARKET_TRADING_DATA" in steps_v: market_trading_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [trading data queries]""Comma seperated values")
+            if "RETRIEVE_COMPANY_FUNDAMENTAL_DATA" in steps_v: company_fundamental_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [company fundamental data queries]""Comma seperated values")
+            if "RETRIEVE_SEC_FILING_DATA" in steps_v: sec_filings_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [sec filing queries]""Comma seperated values")
         parameterizer = dspy.ChainOfThought(FinancialQueryParameterizer)
-        result = parameterizer(query=query)
+        result = dict(parameterizer(query=query, steps=", ".join(steps_v), reasoning=reasoning))
 
         if debug:
             print(result)
-        return dict(result)
+        return {k: [v.strip().rstrip() for v in result[k].split(",")] for k in result}
 
 if __name__ == "__main__":
     try:
@@ -156,11 +200,12 @@ if __name__ == "__main__":
         start = time.time_ns() // 1e6
         orchestrator = Orchestrator(temperature=0, model=routers["OPENROUTER"]["models"]["hunyuan13b"])
         print(f"Initialized orchestrator - {time.time_ns() // 1e6 - start}ms")
-        res_analyze = orchestrator.query_to_steps(args.query, args.debug.lower() == "true")
-        print(f"Analyzed Query - {time.time_ns() // 1e6 - start}ms")
-        res_parameterize = orchestrator.parameterize_query(args.query, res_analyze["steps"], args.debug.lower() == "true")
-        print(f"Parameterized Query - {time.time_ns() // 1e6 - start}ms")
-        print(f"Steps: {res_analyze['steps']}\nParameters: {dict((k, v) for k, v in res_parameterize.items() if k != 'reasoning' and v != str(chr(39)) * 2 )}")
+        res_analyze = orchestrator.analyze_query(args.query, args.debug.lower() == "true")
+        print(f"Found steps - {time.time_ns() // 1e6 - start}ms")
+        print(f"Steps: {res_analyze['steps']}")
+        res_parameterize = orchestrator.parameterize_query(args.query + str(orchestrator.parameterize_query(args.query, res_analyze["steps"], res_analyze["reasoning"], args.debug.lower() == "true")), res_analyze["steps"], res_analyze["reasoning"], args.debug.lower() == "true")
+        print(f"Parameterized steps - {time.time_ns() // 1e6 - start}ms")
+        print(f"Parameters: {dict((k, v) for k, v in res_parameterize.items() if k != 'reasoning' and v != str(chr(39)) * 2 )}")
     except:
         traceback.print_exc()
     finally:
