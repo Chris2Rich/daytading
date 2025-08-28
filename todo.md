@@ -37,8 +37,27 @@
 
 ### Agents
 
-- [ ] create agent class - takes in instructions, creates final parameters and executes
+- [x] create agent class - takes in instructions, creates final parameters and executes
 - [ ] implement the various agents that are needed
+
+### Agents - specific
+
+- [x] implement reporting agent short summarization
+- [ ] implement reporting agent short report (more detailed summarization)
+- [ ] implement reporting agent detailed report (presentations, reports, etc)
+
+- [ ] implement retrieval agent yfinance search
+- [ ] implement retrieval agent filing search
+- [ ] implement retrieval agent fred search
+- [ ] implement retrieval agent news search
+- [ ] implement retrieval agent internet search
+
+- [ ] implement trading agent strategizer
+- [ ] implement trading agent strategy coder
+- [ ] implement trading agent strategy backtester
+
+- [ ] implement analysis agent strategy ratio calculator
+- [ ] implement analysis agent strategy timeseries summary statistics
 
 ### Evaluator
 
@@ -48,7 +67,8 @@
 
 Allows for models to retrieve session information easily - stores session data as a json file that is a serialized python dict, each object has a name, description and type (types allow for different types of summarization, eg semantic summarization with llm for textual data vs summary statistics for timeseries)
 
-- [ ] create tools for listing, retrieval, summarization
+- [x] create tools for listing, retrieval, summarization
+- [ ] create data summarization tooks (summary statistics)
 
 ## Tools
 

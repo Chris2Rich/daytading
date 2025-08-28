@@ -19,44 +19,24 @@ import time
 # from retrieval.filerag import create_context, Chunk, metadata
 # context = create_context(datadir=Path("data/filings"), embeddings_dir=Path("data/embeddings"), should_embed=False)
 from executionsteps import ExecutionStep, ExecutionResult
-
-routers = {
-    "OPENROUTER" : {
-        "base_url": "https://openrouter.ai/api/v1/chat/completions",
-        "api_key": os.environ["OPENROUTER_TOKEN_DAYTADING"],
-        "models": {
-            "kimik2": "openrouter/moonshotai/kimi-k2:free", # unstable with dspy
-            "horizonbeta": "openrouter/openrouter/horizon-beta",
-            "quen3coder30b": "openrouter/qwen/qwen3-coder:free", 
-            "glm4.5air": "openrouter/z-ai/glm-4.5-air:free", 
-            "hunyuan13b": "openrouter/tencent/hunyuan-a13b-instruct:free", 
-            "r1t2chimera" : "openrouter/tngtech/deepseek-r1t2-chimera:free",
-            "r10528" : "openrouter/deepseek/deepseek-r1-0528:free",
-        }
-    },
-    "GROQ" : {
-        "base_url": "https://api.groq.com/openai/v1/chat/completions",
-        "api_key": os.environ["GROQ_TOKEN_DAYTADING"],
-        "models": {
-            "llama70bdsr1": "deepseek-r1-distill-llama-70b"
-        }
-    }
-}
+from llm.lmwrapper import LM_WRAPPER
+from pinpointer import Pinpointer, ObjectPointer
 
 @dataclass
 class RetrievalSteps:
-    SEARCH_INTERNET: bool = False
-    SEARCH_NEWS: bool = False
+    # SEARCH_INTERNET: bool = False
+    # SEARCH_NEWS: bool = False
 
-    RETRIEVE_MACROECONOMIC_DATA: bool = False
+    # RETRIEVE_MACROECONOMIC_DATA: bool = False
     RETRIEVE_MARKET_TRADING_DATA: bool = False
     RETRIEVE_COMPANY_FUNDAMENTAL_DATA: bool = False
     RETRIEVE_SEC_FILING_DATA: bool = False
 
 @dataclass
 class StrategySteps:
-    DEVELOP_TRADING_STRATEGY: bool = False
-    BACKTEST_TRADING_STRATEGY: bool = False
+    # DEVELOP_TRADING_STRATEGY: bool = False
+    # BACKTEST_TRADING_STRATEGY: bool = False
+    pass
 
 @dataclass
 class AnalysisSteps:
@@ -66,8 +46,8 @@ class AnalysisSteps:
 @dataclass
 class ReportingSteps:
     SUMMARIZE_FINDINGS: bool = False
-    CREATE_SHORT_REPORT: bool = False
-    CREATE_DETAILED_REPORT: bool = False
+    # CREATE_SHORT_REPORT: bool = False
+    # CREATE_DETAILED_REPORT: bool = False
 
 @dataclass
 class SystemSteps:
@@ -94,12 +74,6 @@ class StepTypeUnion:
             if field_type not in ignore:
                 all_steps.extend(steps_to_list(field_type))
         return all_steps
-
-class LM_WRAPPER():
-    def __init__(self, model: str = routers["OPENROUTER"]["models"]["r10528"], temperature: float = 0.6, provider: str = "OPENROUTER"):
-
-        self.lm = dspy.LM(model, api_key=routers[provider]["api_key"], api_base=routers[provider]["base_url"], temperature=temperature, max_tokens=4000, stop=None, cache=True, cache_in_memory=False, extra_headers=(None if provider != "OPENROUTER" else {"HTTP-Referer": "https://nodomainyet.com","X-Title": "notitleyet"}))
-        dspy.configure(lm=self.lm)
 
 class Orchestrator(LM_WRAPPER):
     def analyze_query(self, query: str, debug: bool = False) -> Dict:
@@ -139,7 +113,7 @@ class Orchestrator(LM_WRAPPER):
         
         analyzer = dspy.ChainOfThought(FinancialQueryAnalysis)
         result = analyzer(query=query)
-        steps_list = [s.strip() for s in str(getattr(result, 'suggested_workflow', '')).upper().split(',') if s.strip()]
+        steps_list = ["BEGIN"] + [s.strip() for s in str(getattr(result, 'suggested_workflow', '')).upper().split(',') if s.strip()] + ["END"]
         reasoning = str(getattr(result, "reasoning", ""))
 
         if debug:
@@ -203,7 +177,7 @@ if __name__ == "__main__":
         res_analyze = orchestrator.analyze_query(args.query, args.debug.lower() == "true")
         print(f"Found steps - {time.time_ns() // 1e6 - start}ms")
         print(f"Steps: {res_analyze['steps']}")
-        res_parameterize = orchestrator.parameterize_query(args.query + str(orchestrator.parameterize_query(args.query, res_analyze["steps"], res_analyze["reasoning"], args.debug.lower() == "true")), res_analyze["steps"], res_analyze["reasoning"], args.debug.lower() == "true")
+        res_parameterize = orchestrator.parameterize_query(args.query, res_analyze["steps"][1:-1], res_analyze["reasoning"], args.debug.lower() == "true")
         print(f"Parameterized steps - {time.time_ns() // 1e6 - start}ms")
         print(f"Parameters: {dict((k, v) for k, v in res_parameterize.items() if k != 'reasoning' and v != str(chr(39)) * 2 )}")
     except:
