@@ -19,7 +19,7 @@ import time
 # from retrieval.filerag import create_context, Chunk, metadata
 # context = create_context(datadir=Path("data/filings"), embeddings_dir=Path("data/embeddings"), should_embed=False)
 from executionsteps import ExecutionStep, ExecutionResult
-from llm.lmwrapper import LM_WRAPPER
+from llm.lmwrapper import LM_WRAPPER, routers
 from pinpointer import Pinpointer, ObjectPointer
 
 @dataclass
