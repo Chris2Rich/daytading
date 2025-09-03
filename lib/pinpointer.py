@@ -130,3 +130,5 @@ class Pinpointer:
             self._summarizer.execute(("Summarize this text into its essential details", obj["content"], False))
         else:
             return
+
+global_pinpointer = Pinpointer()

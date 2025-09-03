@@ -1,11 +1,15 @@
 from typing import Dict, List, Any, Tuple, Optional, Callable, Union
 from enum import Enum
 import dspy
+import uuid
 import time
 
 from llm.lmwrapper import LM_WRAPPER
 from executionsteps import ExecutionStep, ExecutionResult
+from pinpointer import global_pinpointer
+
 from reporting.summarize import summarize
+from retrieval.yahoofinance import get_trading, get_fundamentals
 
 class AgentType(Enum):
     RETRIEVAL = "RETRIEVAL"
@@ -41,7 +45,7 @@ class ReportingAgent(BaseAgent):
     def __init__(self, instructions: List[Tuple[str, List[str]]] = None):
         super().__init__(category=AgentType.REPORTING, instructions=instructions)
     
-    def execute(self, instruction: Optional[Tuple[str, List[str]]], use_md: bool = False) -> ExecutionResult:
+    def execute(self, instruction: Optional[Tuple[str, List[str]]], use_md: bool = False, user_id: str = None) -> ExecutionResult:
         try:
             if instruction == None:
                 instruction = self.instructions[0]
@@ -56,13 +60,17 @@ class RetrievalAgent(BaseAgent):
     def __init__(self, instructions: List[Tuple[str, List[str]]] = None):
         super().__init__(category=AgentType.RETRIEVAL, instructions=instructions)
 
-    def execute(self, instruction: Optional[Tuple[str, List[str]]], use_md: bool = False) -> ExecutionResult:
+    def execute(self, instruction: Optional[Tuple[str, List[str]]], use_md: bool = False, user_id: str = None) -> ExecutionResult:
         try:
             if instruction == None:
                 instruction = self.instructions[0]
                 self.instructions = self.instructions[1:]
             match instruction[0]:
                 case "RETRIEVE_MARKET_TRADING_DATA":
-                    return ExecutionResult(True)
+                    res = ExecutionResult(True, get_trading(instruction[1][0], instruction[1][1], instruction[1][2]))
+                    if res.success:
+                        obj_id = str(uuid.uuid4())
+                        global_pinpointer.create_object(obj_id, user_id, None, "tabular", res.data)
+                        return ExecutionResult(True, obj_id)
         except Exception as e:
             return ExecutionResult(False, None, e)

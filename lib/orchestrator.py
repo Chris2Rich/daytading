@@ -19,8 +19,8 @@ import time
 # from retrieval.filerag import create_context, Chunk, metadata
 # context = create_context(datadir=Path("data/filings"), embeddings_dir=Path("data/embeddings"), should_embed=False)
 from executionsteps import ExecutionStep, ExecutionResult
-from llm.lmwrapper import LM_WRAPPER, routers
-from pinpointer import Pinpointer, ObjectPointer
+from llm.lmwrapper import LM_WRAPPER
+from pinpointer import global_pinpointer, ObjectPointer
 
 @dataclass
 class RetrievalSteps:
@@ -154,8 +154,10 @@ class Orchestrator(LM_WRAPPER):
             if "SEARCH_INTERNET" in steps_v: search_internet_query = dspy.OutputField(desc=f"named_entities, named_assets, named_concepts, financial query -> (any amount) [internet search queries]""Comma seperated values")
             if "SEARCH_NEWS" in steps_v: search_news_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [news search queries]""Comma seperated values")
             # MACRO - TODO
-            if "RETRIEVE_MARKET_TRADING_DATA" in steps_v: market_trading_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [trading data queries]""Comma seperated values")
-            if "RETRIEVE_COMPANY_FUNDAMENTAL_DATA" in steps_v: company_fundamental_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [company fundamental data queries]""Comma seperated values")
+            if "RETRIEVE_MARKET_TRADING_DATA" in steps_v: market_trading_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [trading data queries]""Comma seperated values"
+            "queries are structured as: '(ticker, number of interval, interval (select one from 1hr, 1d, 1mo))'")
+            if "RETRIEVE_COMPANY_FUNDAMENTAL_DATA" in steps_v: company_fundamental_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [company fundamental data queries]""Comma seperated values"
+            "queries are structured as: '(ticker, statement type (select one from income_statement, balance_sheet), period (select from annual, quarterly))'")
             if "RETRIEVE_SEC_FILING_DATA" in steps_v: sec_filings_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [sec filing queries]""Comma seperated values")
         parameterizer = dspy.ChainOfThought(FinancialQueryParameterizer)
         result = dict(parameterizer(query=query, steps=", ".join(steps_v), reasoning=reasoning))
@@ -172,7 +174,7 @@ if __name__ == "__main__":
         args = parser.parse_args()
 
         start = time.time_ns() // 1e6
-        orchestrator = Orchestrator(temperature=0, model=routers["OPENROUTER"]["models"]["hunyuan13b"])
+        orchestrator = Orchestrator()
         print(f"Initialized orchestrator - {time.time_ns() // 1e6 - start}ms")
         res_analyze = orchestrator.analyze_query(args.query, args.debug.lower() == "true")
         print(f"Found steps - {time.time_ns() // 1e6 - start}ms")

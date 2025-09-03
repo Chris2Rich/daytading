@@ -9,11 +9,12 @@ routers = {
         "models": {
             "kimik2": "openrouter/moonshotai/kimi-k2:free", # unstable with dspy
             "horizonbeta": "openrouter/openrouter/horizon-beta",
-            "quen3coder30b": "openrouter/qwen/qwen3-coder:free", 
+            "qwen3coder480b": "openrouter/qwen/qwen3-coder:free", 
             "glm4.5air": "openrouter/z-ai/glm-4.5-air:free", 
             "hunyuan13b": "openrouter/tencent/hunyuan-a13b-instruct:free", 
             "r1t2chimera" : "openrouter/tngtech/deepseek-r1t2-chimera:free",
             "r10528" : "openrouter/deepseek/deepseek-r1-0528:free",
+            "deepseekv3.1" : "openrouter/deepseek/deepseek-chat-v3.1:free"
         }
     },
     "GROQ" : {
@@ -26,7 +27,7 @@ routers = {
 }
 
 class LM_WRAPPER():
-    def __init__(self, model: str = routers["OPENROUTER"]["models"]["r10528"], temperature: float = 0.6, provider: str = "OPENROUTER"):
+    def __init__(self, model: str = routers["OPENROUTER"]["models"]["deepseekv3.1"], temperature: float = 0.0, provider: str = "OPENROUTER"):
 
         self.lm = dspy.LM(model, api_key=routers[provider]["api_key"], api_base=routers[provider]["base_url"], temperature=temperature, max_tokens=4000, stop=None, cache=True, cache_in_memory=False, extra_headers=(None if provider != "OPENROUTER" else {"HTTP-Referer": "https://nodomainyet.com","X-Title": "notitleyet"}))
         dspy.configure(lm=self.lm)
