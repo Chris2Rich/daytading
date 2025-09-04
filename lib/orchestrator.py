@@ -34,7 +34,7 @@ class RetrievalSteps:
 
 @dataclass
 class StrategySteps:
-    # DEVELOP_TRADING_STRATEGY: bool = False
+    DEVELOP_TRADING_STRATEGY: bool = False
     # BACKTEST_TRADING_STRATEGY: bool = False
     pass
 
