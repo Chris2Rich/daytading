@@ -53,9 +53,9 @@ class ReportingAgent(BaseAgent):
             match instruction[0]:
                 case "SUMMARIZE_FINDINGS":
                     return ExecutionResult(True, summarize(context=instruction[1][0], data=instruction[1][1], use_md=use_md))
-                case "CREATE_SHORT_REPORT: 
+                case "CREATE_SHORT_REPORT": 
                     raise Exception("Method not implemented yet")
-                case "CREATE_DETAILED_REPORT:
+                case "CREATE_DETAILED_REPORT":
                     raise Exception("Method not implemented yet")
         except Exception as e:
             return ExecutionResult(False, None, e)
