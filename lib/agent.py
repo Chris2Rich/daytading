@@ -53,6 +53,10 @@ class ReportingAgent(BaseAgent):
             match instruction[0]:
                 case "SUMMARIZE_FINDINGS":
                     return ExecutionResult(True, summarize(context=instruction[1][0], data=instruction[1][1], use_md=use_md))
+                case "CREATE_SHORT_REPORT: 
+                    raise Exception("Method not implemented yet")
+                case "CREATE_DETAILED_REPORT:
+                    raise Exception("Method not implemented yet")
         except Exception as e:
             return ExecutionResult(False, None, e)
 
@@ -72,5 +76,21 @@ class RetrievalAgent(BaseAgent):
                         obj_id = str(uuid.uuid4())
                         global_pinpointer.create_object(obj_id, user_id, None, "tabular", res.data)
                         return ExecutionResult(True, obj_id)
+        except Exception as e:
+            return ExecutionResult(False, None, e)
+
+class StrategyAgent(BaseAgent):
+    def __init(self, instructions:List[Tuple[str, List[str]]] = None):
+        super.__init__(category=AgentType.STRATEGY, instructions=instructions)
+    def execute(self, instruction: Optional[Tuple[str, List[str]]]) -> ExecutionResult:
+        try:
+            if instruction == None:
+                instruction = self.instructions[0]
+                self.instructions = self.instructions[1:]
+            match instruction[0]:
+                case "DEVELOP_TRADING_STRATEGY":
+                    raise Exception("Method not implemented yet")
+                case "BACKTEST_TRADING_STRATEGY":
+                    raise Exception("Method not implemented yet")
         except Exception as e:
             return ExecutionResult(False, None, e)
