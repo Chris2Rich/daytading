@@ -43,21 +43,21 @@
 ### Agents - specific
 
 - [x] implement reporting agent short summarization
-- [ ] implement reporting agent short report (more detailed summarization)
-- [ ] implement reporting agent detailed report (presentations, reports, etc)
+<!-- - [ ] implement reporting agent short report (more detailed summarization) -->
+<!-- - [ ] implement reporting agent detailed report (presentations, reports, etc) -->
 
 - [ ] implement retrieval agent yfinance search
-- [ ] implement retrieval agent filing search
+<!-- - [ ] implement retrieval agent filing search -->
 - [ ] implement retrieval agent fred search
-- [ ] implement retrieval agent news search
-- [ ] implement retrieval agent internet search
+<!-- - [ ] implement retrieval agent news search -->
+<!-- - [ ] implement retrieval agent internet search -->
 
-- [ ] implement trading agent strategizer
-- [ ] implement trading agent strategy coder
-- [ ] implement trading agent strategy backtester
+<!-- - [ ] implement trading agent strategizer -->
+<!-- - [ ] implement trading agent strategy coder -->
+<!-- - [ ] implement trading agent strategy backtester -->
 
-- [ ] implement analysis agent strategy ratio calculator
-- [ ] implement analysis agent strategy timeseries summary statistics
+- [ ] implement analysis agent ratio calculator
+- [ ] implement analysis agent timeseries summary statistics
 
 ### Evaluator
 

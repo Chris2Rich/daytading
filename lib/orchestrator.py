@@ -20,17 +20,17 @@ import time
 # context = create_context(datadir=Path("data/filings"), embeddings_dir=Path("data/embeddings"), should_embed=False)
 from executionsteps import ExecutionStep, ExecutionResult
 from llm.lmwrapper import LM_WRAPPER
-from pinpointer import global_pinpointer, ObjectPointer
+import pinpointer
 
 @dataclass
 class RetrievalSteps:
     # SEARCH_INTERNET: bool = False
     # SEARCH_NEWS: bool = False
 
-    # RETRIEVE_MACROECONOMIC_DATA: bool = False
+    RETRIEVE_MACROECONOMIC_DATA: bool = False
     RETRIEVE_MARKET_TRADING_DATA: bool = False
     RETRIEVE_COMPANY_FUNDAMENTAL_DATA: bool = False
-    RETRIEVE_SEC_FILING_DATA: bool = False
+    # RETRIEVE_SEC_FILING_DATA: bool = False
 
 @dataclass
 class StrategySteps:
@@ -152,7 +152,7 @@ class Orchestrator(LM_WRAPPER):
                 "If empty then return ''"
             )
             if "SEARCH_INTERNET" in steps_v: search_internet_query = dspy.OutputField(desc=f"named_entities, named_assets, named_concepts, financial query -> (any amount) [internet search queries]""Comma seperated values")
-            if "SEARCH_NEWS" in steps_v: search_news_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [news search queries]""Comma seperated values")
+            if "SEARCH_NEWS" in steps_v: search_news_quezry = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [news search queries]""Comma seperated values")
             # MACRO - TODO
             if "RETRIEVE_MARKET_TRADING_DATA" in steps_v: market_trading_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [trading data queries]""Comma seperated values"
             "queries are structured as: '(ticker, number of interval, interval (select one from 1hr, 1d, 1mo))'")

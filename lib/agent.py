@@ -6,7 +6,7 @@ import time
 
 from llm.lmwrapper import LM_WRAPPER
 from executionsteps import ExecutionStep, ExecutionResult
-from pinpointer import global_pinpointer
+import pinpointer
 
 from reporting.summarize import summarize
 from retrieval.yahoofinance import get_trading, get_fundamentals
@@ -22,6 +22,7 @@ class BaseAgent(LM_WRAPPER):
     def __init__(self, category: AgentType = None, instructions: Dict[str, List[str]] = None):
         # Agent takes in type and a list of instruction names and generic parameters as given by parameterizer
         super().__init__()
+        self.user_id = str(uuid.uuid4())
         self.category = category
         self.instructions = instructions
     
@@ -64,7 +65,7 @@ class RetrievalAgent(BaseAgent):
     def __init__(self, instructions: List[Tuple[str, List[str]]] = None):
         super().__init__(category=AgentType.RETRIEVAL, instructions=instructions)
 
-    def execute(self, instruction: Optional[Tuple[str, List[str]]], use_md: bool = False, user_id: str = None) -> ExecutionResult:
+    def execute(self, instruction: Optional[Tuple[str, List[str]]], use_md: bool = False) -> ExecutionResult:
         try:
             if instruction == None:
                 instruction = self.instructions[0]
@@ -74,7 +75,7 @@ class RetrievalAgent(BaseAgent):
                     res = ExecutionResult(True, get_trading(instruction[1][0], instruction[1][1], instruction[1][2]))
                     if res.success:
                         obj_id = str(uuid.uuid4())
-                        global_pinpointer.create_object(obj_id, user_id, None, "tabular", res.data)
+                        pinpointer.global_pinpointer.create_object(obj_id, self.user_id, None, "tabular", res.data)
                         return ExecutionResult(True, obj_id)
         except Exception as e:
             return ExecutionResult(False, None, e)

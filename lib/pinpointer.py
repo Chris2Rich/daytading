@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 import json
 
-from agent import ReportingAgent
+import agent
 
 Base = declarative_base()
 
@@ -30,7 +30,7 @@ class Pinpointer:
         self.engine = create_engine(db_url)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
-        self._summarizer = ReportingAgent()
+        self._summarizer = agent.ReportingAgent()
 
     def list_objects(self, user: str) -> list[dict]:
         """
