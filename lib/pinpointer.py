@@ -32,7 +32,7 @@ class Pinpointer:
         self.Session = sessionmaker(bind=self.engine)
         self._summarizer = agent.ReportingAgent()
 
-    def list_objects(self, user: str) -> list[dict]:
+    def list_objects(self, user: str, filters: list = None) -> list[dict]:
         """
         List all objects owned by the specified user.
         Returns a list of dictionaries containing metadata for each object.
@@ -40,7 +40,7 @@ class Pinpointer:
         session = self.Session()
         try:
             pinned_objects = session.query(ObjectPointer).filter_by(user=user).order_by(ObjectPointer.timestamp.desc()).all()
-            return [
+            return list(filter( None, [
                 {
                     "object_id": obj.object_id,
                     "description": obj.description,
@@ -48,8 +48,8 @@ class Pinpointer:
                     "timestamp": obj.timestamp.isoformat(),
                     "source": obj.source
                 }
-                for obj in pinned_objects
-            ]
+                if [obj[i[0]] == i[1] for i in filters] == [True] * len(filters) else None for obj in pinned_objects
+            ]))
         finally:
             session.close()
 

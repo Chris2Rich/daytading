@@ -11,6 +11,11 @@ def get_trading(ticker: str, days: int, interval: str):
 
     return data
 
+def get_option(ticker: str, expiry: str, direction: str, strike: float):
+    optionstring = ticker + expiry + direction + f"{int(strike * 1000):08d}"
+    asset = yf.Ticker(optionstring)
+    return asset.history()
+
 def get_option_chain(ticker: str, expiry: str):
     stock = yf.Ticker(ticker)
     option_chain = stock.option_chain(expiry)
@@ -31,3 +36,16 @@ def get_fundamentals(ticker: str, statement_type: str, period: str):
             return stock.balance_sheet.to_dict()
         else:
             return stock.quarterly_balance_sheet.to_dict()
+
+def get_price_targets(ticker: str):
+    ticker = yf.Ticker(ticker)
+
+    recommendations = ticker.recommendations
+    target_price = ticker.info.get('targetMeanPrice')
+    rating = ticker.info.get('recommendationKey')
+    return {
+        'ticker': ticker,
+        'target_mean_price': target_price,
+        'recommendation': rating,
+        'recommendation_history': recommendations.tail(10)  # last 10
+    }

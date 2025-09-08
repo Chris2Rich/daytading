@@ -9,7 +9,7 @@ from executionsteps import ExecutionStep, ExecutionResult
 import pinpointer
 
 from reporting.summarize import summarize
-from retrieval.yahoofinance import get_trading, get_fundamentals
+from retrieval.yahoofinance import get_trading, get_option_chain, get_fundamentals
 
 class AgentType(Enum):
     RETRIEVAL = "RETRIEVAL"
@@ -75,7 +75,13 @@ class RetrievalAgent(BaseAgent):
                     res = ExecutionResult(True, get_trading(instruction[1][0], instruction[1][1], instruction[1][2]))
                     if res.success:
                         obj_id = str(uuid.uuid4())
-                        pinpointer.global_pinpointer.create_object(obj_id, self.user_id, None, "tabular", res.data)
+                        pinpointer.global_pinpointer.create_object(obj_id, self.user_id, ",".join(instruction[1]), "marketohlc", res.data)
+                        return ExecutionResult(True, obj_id)
+                case "RETRIEVE_MARKET_OPTION_DATA":
+                    res = ExecutionResult(True, get_option_chain(instruction[1][0], instruction[1][1]))
+                    if res.success:
+                        obj_id = str(uuid.uuid4())
+                        pinpointer.global_pinpointer.create_object(obj_id, self.user_id, None, "optionchain", res.data)
                         return ExecutionResult(True, obj_id)
         except Exception as e:
             return ExecutionResult(False, None, e)
@@ -92,6 +98,22 @@ class StrategyAgent(BaseAgent):
                 case "DEVELOP_TRADING_STRATEGY":
                     raise Exception("Method not implemented yet")
                 case "BACKTEST_TRADING_STRATEGY":
+                    raise Exception("Method not implemented yet")
+        except Exception as e:
+            return ExecutionResult(False, None, e)
+
+class AnalysisAgent(BaseAgent):
+    def __init(self, instructions:List[Tuple[str, List[str]]] = None):
+        super.__init__(category=AgentType.ANALYSIS, instructions=instructions)
+    def execute(self, instruction: Optional[Tuple[str, List[str]]]) -> ExecutionResult:
+        try:
+            if instruction == None:
+                instruction = self.instructions[0]
+                self.instructions = self.instructions[1:]
+            match instruction[0]:
+                case "CALCULATE_FUNDAMENTAL_RATIOS":
+                    raise Exception("Method not implemented yet")
+                case "CALCULATE_TIMESERIES_STATISTICS":
                     raise Exception("Method not implemented yet")
         except Exception as e:
             return ExecutionResult(False, None, e)

@@ -48,7 +48,7 @@
 
 - [ ] implement retrieval agent yfinance search
 <!-- - [ ] implement retrieval agent filing search -->
-- [ ] implement retrieval agent fred search
+<!-- - [ ] implement retrieval agent fred search -->
 <!-- - [ ] implement retrieval agent news search -->
 <!-- - [ ] implement retrieval agent internet search -->
 

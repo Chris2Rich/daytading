@@ -27,8 +27,9 @@ class RetrievalSteps:
     # SEARCH_INTERNET: bool = False
     # SEARCH_NEWS: bool = False
 
-    RETRIEVE_MACROECONOMIC_DATA: bool = False
+    # RETRIEVE_MACROECONOMIC_DATA: bool = False
     RETRIEVE_MARKET_TRADING_DATA: bool = False
+    RETRIEVE_MARKET_OPTION_DATA: bool = False
     RETRIEVE_COMPANY_FUNDAMENTAL_DATA: bool = False
     # RETRIEVE_SEC_FILING_DATA: bool = False
 
@@ -156,6 +157,8 @@ class Orchestrator(LM_WRAPPER):
             # MACRO - TODO
             if "RETRIEVE_MARKET_TRADING_DATA" in steps_v: market_trading_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [trading data queries]""Comma seperated values"
             "queries are structured as: '(ticker, number of interval, interval (select one from 1hr, 1d, 1mo))'")
+            if "RETRIEVE_MARKET_OPTION_DATA" in steps_v: market_trading_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [option data queries]""Comma seperated values"
+            "queries are structured as: '(ticker, expiry-date)'")
             if "RETRIEVE_COMPANY_FUNDAMENTAL_DATA" in steps_v: company_fundamental_data_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [company fundamental data queries]""Comma seperated values"
             "queries are structured as: '(ticker, statement type (select one from income_statement, balance_sheet), period (select from annual, quarterly))'")
             if "RETRIEVE_SEC_FILING_DATA" in steps_v: sec_filings_query = dspy.OutputField(desc=f"named_entities, named_assets, financial query -> (any amount) [sec filing queries]""Comma seperated values")
