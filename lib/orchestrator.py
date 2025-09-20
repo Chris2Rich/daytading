@@ -25,7 +25,7 @@ import pinpointer
 @dataclass
 class RetrievalSteps:
     # SEARCH_INTERNET: bool = False
-    # SEARCH_NEWS: bool = False
+    SEARCH_NEWS: bool = False
 
     # RETRIEVE_MACROECONOMIC_DATA: bool = False
     RETRIEVE_MARKET_TRADING_DATA: bool = False
@@ -77,6 +77,24 @@ class StepTypeUnion:
         return all_steps
 
 class Orchestrator(LM_WRAPPER):
+    def rewrite_query(self, query: str, debug: bool = False) -> str:
+        class RewriteQuery(dspy.Signature):
+            """
+            Rewrite the query to better fit its use case as the input to a strategy development AI agent.
+            Emphasise internet/news searches if the original query would be aided by it.
+            Be technical.
+            """
+
+            query = dspy.InputField(desc="Original input query")
+            rewritten_query = dspy.OutputField(desc="Rewritten Query")
+
+        rewriter = dspy.ChainOfThought(RewriteQuery)
+        result = rewriter(query=query)
+
+        if debug:
+            print(result)
+        return result.rewritten_query
+
     def analyze_query(self, query: str, debug: bool = False) -> Dict:
         class FinancialQueryAnalysis(dspy.Signature):
             """
@@ -179,9 +197,15 @@ if __name__ == "__main__":
         start = time.time_ns() // 1e6
         orchestrator = Orchestrator()
         print(f"Initialized orchestrator - {time.time_ns() // 1e6 - start}ms")
+        start = time.time_ns() // 1e6
+        query = orchestrator.rewrite_query(args.query, args.debug.lower() == "true")
+        print(f"Rewrote query - {time.time_ns() // 1e6 - start}ms")
+        print(f"Query: {query}")
+        start = time.time_ns() // 1e6
         res_analyze = orchestrator.analyze_query(args.query, args.debug.lower() == "true")
         print(f"Found steps - {time.time_ns() // 1e6 - start}ms")
         print(f"Steps: {res_analyze['steps']}")
+        start = time.time_ns() // 1e6
         res_parameterize = orchestrator.parameterize_query(args.query, res_analyze["steps"][1:-1], res_analyze["reasoning"], args.debug.lower() == "true")
         print(f"Parameterized steps - {time.time_ns() // 1e6 - start}ms")
         print(f"Parameters: {dict((k, v) for k, v in res_parameterize.items() if k != 'reasoning' and v != str(chr(39)) * 2 )}")

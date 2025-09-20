@@ -71,6 +71,12 @@ class RetrievalAgent(BaseAgent):
                 instruction = self.instructions[0]
                 self.instructions = self.instructions[1:]
             match instruction[0]:
+                case "SEARCH_NEWS":
+                    res = ExecutionResult(True, get_trading(instruction[1][0], instruction[1][1], instruction[1][2]))
+                    if res.success:
+                        obj_id = str(uuid.uuid4())
+                        pinpointer.global_pinpointer.create_object(obj_id, self.user_id, ",".join(instruction[1]), "marketohlc", res.data)
+                        return ExecutionResult(True, obj_id)
                 case "RETRIEVE_MARKET_TRADING_DATA":
                     res = ExecutionResult(True, get_trading(instruction[1][0], instruction[1][1], instruction[1][2]))
                     if res.success:
