@@ -3,6 +3,7 @@ import os
 import json
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
+import yfinance as yf
 
 def get_gnews(query: str):
     aggresurl = f"https://gnews.io/api/v4/search?q={'+'.join(query.split(' '))}&apikey={os.environ['GNEWS_TOKEN']}"
@@ -45,4 +46,38 @@ def get_gnews(query: str):
             
     return cleaned_articles
 
-print(get_gnews("Nepal corruption"))
+def get_ticker_news(ticker: str):
+    news_items = yf.Search(ticker, news_count=5).news
+    cleaned_articles = []
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+
+    for item in news_items:
+        link = item.get("link")
+        title = item.get("title")
+        if not link or not title:
+            continue
+
+        try:
+            response = requests.get(link, headers=headers, timeout=3)
+            response.raise_for_status()
+            html = response.text
+            soup = BeautifulSoup(html, 'html.parser')
+
+            article_content = ""
+            for s in soup(['script', 'style', 'header', 'footer', 'nav']):
+                s.decompose()
+            
+            body_html = soup.body
+            if body_html:
+                article_content = md(str(body_html), heading_style="ATX").strip()
+
+            if article_content:
+                cleaned_articles.append({"title": title, "content": article_content})
+
+        except Exception as e:
+            continue
+            
+    return cleaned_articles
