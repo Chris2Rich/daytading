@@ -1,5 +1,3 @@
-asyncio
-ssl
 websockets
 pathlib
 uuid
@@ -18,4 +16,3 @@ markdownify
 bs4
 urllib
 fredapi
-asyncio
