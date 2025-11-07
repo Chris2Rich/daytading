@@ -57,6 +57,9 @@ async def testllm_handler(websocket, client_id, path):
             task = asyncio.create_task(stream_with_heartbeat())
             active_requests[client_id] = task
 
+            # Wrap the task execution in a try...except...finally block
+            try:
+                await task
             except asyncio.TimeoutError as e:
                 if "No chunk received" in str(e):
                     await websocket.send(sanitize_error("TIMEOUT_PER_chunk"))
