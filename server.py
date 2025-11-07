@@ -116,8 +116,8 @@ async def main():
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(cert_path, key_path)
 
-    async with websockets.serve(main_handler, "localhost", 3000, ssl=ssl_context):
-        print("Secure WebSocket server started on wss://localhost:3000")
+    async with websockets.serve(main_handler, "0.0.0.0", 443, ssl=ssl_context):
+        print("Secure WebSocket server started on wss://0.0.0.0:443")
         await asyncio.Future()
 
 if __name__ == "__main__":
