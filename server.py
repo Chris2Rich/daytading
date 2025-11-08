@@ -18,7 +18,7 @@ PER_CHUNK_TIMEOUT = 30
 MAX_MEMORY_MESSAGES = 50
 
 SENTINEL = "_____"
-ALLOWED_ORIGINS = ["https://zecant.com"]
+ALLOWED_ORIGINS = ["https://www.zecant.com", "https://wwzecant.com"]
 
 lm = LM_WRAPPER(routers["GROQ"]["models"]["gptoss120"])
 
