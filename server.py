@@ -8,6 +8,7 @@ import os
 import traceback
 import aiohttp
 import json
+import dspy
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
