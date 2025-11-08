@@ -15,7 +15,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 from llm.lmwrapper import LM_WRAPPER, routers
 
 PER_CHUNK_TIMEOUT = 30
-MAX_MEMORY_MESSAGES = 50  # Prevent unbounded memory growth
+MAX_MEMORY_MESSAGES = 50
 
 SENTINEL = "_____"
 ALLOWED_ORIGINS = ["https://zecant.com"]
@@ -46,13 +46,10 @@ async def testllm_handler(websocket, client_id, path):
     
     try:
         async for message in websocket:
-            # Check if there's already an active request
             if active_requests.get(client_id):
-                # Send busy error instead of silently dropping
                 await websocket.send(sanitize_error("BUSY"))
                 continue
 
-            # Trim memory to prevent unbounded growth
             if len(client_data["memory"]) > MAX_MEMORY_MESSAGES:
                 client_data["memory"] = client_data["memory"][-MAX_MEMORY_MESSAGES:]
             
@@ -68,22 +65,16 @@ async def testllm_handler(websocket, client_id, path):
                 ):
                     await websocket.send(chunk)
                     last_chunk_time = asyncio.get_event_loop().time()
-                    
-                    # Check if we've exceeded timeout since last chunk
-                    # This is a simplified check; for true timeout, use asyncio.wait_for
                 
             await websocket.send(f"{SENTINEL}start")
             
-            # Create task with timeout
             try:
                 task = asyncio.create_task(stream_with_timeout())
                 active_requests[client_id] = task
                 
-                # Wait for task with overall timeout
                 await asyncio.wait_for(task, timeout=PER_CHUNK_TIMEOUT * 10)
                 
             except asyncio.TimeoutError:
-                # Cancel the task if it's still running
                 if not task.done():
                     task.cancel()
                     try:
@@ -93,12 +84,10 @@ async def testllm_handler(websocket, client_id, path):
                 
                 await websocket.send(sanitize_error("TIMEOUT_PER_CHUNK"))
                 
-                # Remove incomplete response from memory
                 if client_data["memory"] and client_data["memory"][-1]["role"] == "assistant":
                     client_data["memory"].pop()
 
             except Exception as e:
-                # Cancel task on error
                 if not task.done():
                     task.cancel()
                     try:
@@ -106,7 +95,6 @@ async def testllm_handler(websocket, client_id, path):
                     except asyncio.CancelledError:
                         pass
                 
-                # Server-side logging
                 error_id = str(uuid.uuid4())
                 print(f"Error {error_id}: {type(e).__name__}: {e}")
                 traceback.print_exc()
@@ -116,12 +104,10 @@ async def testllm_handler(websocket, client_id, path):
                 except:
                     pass
                 
-                # Remove incomplete response from memory
                 if client_data["memory"] and client_data["memory"][-1]["role"] == "assistant":
                     client_data["memory"].pop()
 
             finally:
-                # Always signal end of stream and clean up
                 try:
                     await websocket.send(f"{SENTINEL}end")
                 except websockets.exceptions.ConnectionClosed:
@@ -134,7 +120,6 @@ async def testllm_handler(websocket, client_id, path):
     except websockets.exceptions.ConnectionClosedOK:
         pass
     finally:
-        # Clean up active request on disconnect
         if client_id in active_requests and active_requests[client_id]:
             task = active_requests[client_id]
             if not task.done():
@@ -178,8 +163,7 @@ async def main_handler(websocket):
 
 async def origin_check(path, request_headers):
     """Enable origin checking for production security"""
-    # Comment out return None to enable origin checking
-    return None
+    # return None
     
     origin = request_headers.get("Origin")
     if not (origin in ALLOWED_ORIGINS):
@@ -199,8 +183,8 @@ async def main():
         443, 
         ssl=ssl_context, 
         process_request=origin_check,
-        ping_interval=20,  # Send ping every 20s
-        ping_timeout=10,   # Wait 10s for pong
+        ping_interval=20,
+        ping_timeout=10,
     ):
         print("Secure WebSocket server started on wss://0.0.0.0:443")
         await asyncio.Future()
