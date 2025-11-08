@@ -37,7 +37,6 @@ class LM_WRAPPER():
     def __init__(self, model: str = routers["OPENROUTER"]["models"]["deepseekv3.1"], temperature: float = 0.0, provider: str = "OPENROUTER"):
 
         self.lm = dspy.LM(model, api_key=routers[provider]["api_key"], api_base=routers[provider]["base_url"], temperature=temperature, max_tokens=4000, stop=None, cache=True, cache_in_memory=False, extra_headers=(None if provider != "OPENROUTER" else {"HTTP-Referer": "https://nodomainyet.com","X-Title": "notitleyet"}))
-        dspy.configure(lm=self.lm)
         
         # Store provider configuration for streaming
         self.provider = provider
@@ -47,64 +46,6 @@ class LM_WRAPPER():
         self.base_url = routers[provider]["base_url"]
         self.extra_headers = (None if provider != "OPENROUTER" else 
                              {"HTTP-Referer": "https://zecant.vercel.app", "X-Title": "Zecant"})
-
-    def stream_sync(self, messages: list, max_tokens: int = 4000) -> Generator[str, None, None]:
-        """
-        Synchronous token streaming from the provider.
-        
-        Args:
-            messages: List of message dictionaries with 'role' and 'content' keys
-            max_tokens: Maximum number of tokens to generate
-            
-        Yields:
-            str: Individual tokens as they are received
-        """
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        if self.extra_headers:
-            headers.update(self.extra_headers)
-        
-        payload = {
-            "model": self.model_name,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": max_tokens,
-            "stream": True
-        }
-        
-        try:
-            with requests.post(
-                self.base_url, 
-                headers=headers, 
-                json=payload, 
-                stream=True,
-                timeout=30
-            ) as response:
-                if response.status_code != 200:
-                    raise Exception(f"API request failed with status {response.status_code}: {response.text}")
-                
-                for line in response.iter_lines():
-                    if line:
-                        line = line.decode('utf-8')
-                        if line.startswith('data: '):
-                            data = line[6:]  # Remove 'data: ' prefix
-                            if data.strip() == '[DONE]':
-                                break
-                            
-                            try:
-                                chunk = json.loads(data)
-                                if 'choices' in chunk and len(chunk['choices']) > 0:
-                                    delta = chunk['choices'][0].get('delta', {})
-                                    if 'content' in delta:
-                                        yield delta['content']
-                            except json.JSONDecodeError:
-                                continue
-                                
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"Streaming request failed: {e}")
 
     async def stream_async(self, messages: list, max_tokens: int = 4000) -> AsyncGenerator[str, None]:
         """
@@ -133,55 +74,40 @@ class LM_WRAPPER():
             "stream": True
         }
         
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.base_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as response:
-                    if response.status != 200:
-                        try:
-                            error_text = await response.text()
-                        except Exception as err:
-                            error_text = f"(failed to read error body: {err})"
-                        raise Exception(f"API request failed with status {response.status}: {error_text or '(no response body)'}")
-                    
-                    async for line in response.content:
-                        line = line.decode('utf-8').strip()
-                        if line.startswith('data: '):
-                            data = line[6:]  # Remove 'data: ' prefix
-                            if data.strip() == '[DONE]':
-                                break
-                            
+        async with dspy.context(self.lm):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self.base_url,
+                        headers=headers,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as response:
+                        if response.status != 200:
                             try:
-                                chunk = json.loads(data)
-                                if 'choices' in chunk and len(chunk['choices']) > 0:
-                                    delta = chunk['choices'][0].get('delta', {})
-                                    if 'content' in delta:
-                                        yield delta['content']
-                            except json.JSONDecodeError:
-                                continue
+                                error_text = await response.text()
+                            except Exception as err:
+                                error_text = f"(failed to read error body: {err})"
+                            raise Exception(f"API request failed with status {response.status}: {error_text or '(no response body)'}")
+                        
+                        async for line in response.content:
+                            line = line.decode('utf-8').strip()
+                            if line.startswith('data: '):
+                                data = line[6:]  # Remove 'data: ' prefix
+                                if data.strip() == '[DONE]':
+                                    break
                                 
-        except aiohttp.ClientError as e:
-            raise Exception(f"Async streaming request failed: {e}")
-
-    def stream_complete_response(self, messages: list, max_tokens: int = 4000) -> str:
-        """
-        Stream tokens and return the complete response as a single string.
-        
-        Args:
-            messages: List of message dictionaries with 'role' and 'content' keys
-            max_tokens: Maximum number of tokens to generate
-            
-        Returns:
-            str: Complete response text
-        """
-        response_text = ""
-        for token in self.stream_tokens_sync(messages, max_tokens):
-            response_text += token
-        return response_text
+                                try:
+                                    chunk = json.loads(data)
+                                    if 'choices' in chunk and len(chunk['choices']) > 0:
+                                        delta = chunk['choices'][0].get('delta', {})
+                                        if 'content' in delta:
+                                            yield delta['content']
+                                except json.JSONDecodeError:
+                                    continue
+                                
+            except aiohttp.ClientError as e:
+                raise Exception(f"Async streaming request failed: {e}")
 
     async def stream_complete_response_async(self, messages: list, max_tokens: int = 4000) -> str:
         """

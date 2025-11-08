@@ -36,8 +36,14 @@ def sanitize_error(code: str, message: str = None) -> str:
     return SENTINEL + "err" + json.dumps(payload)
 
 async def testllm_handler(websocket, client_id, path):
-    lm = LM_WRAPPER(routers["GROQ"]["models"]["gptoss120"])
+    client_data = clients[client_id]
 
+    # initialize LM only when first needed
+    if client_data["lm"] is None:
+        client_data["lm"] = LM_WRAPPER(routers["GROQ"]["models"]["gptoss120"])
+
+    lm = client_data["lm"]
+    
     try:
         async for message in websocket:
 
@@ -93,7 +99,6 @@ async def testllm_handler(websocket, client_id, path):
     except websockets.exceptions.ConnectionClosedError:
         pass
     finally:
-        clients.pop(client_id, None)
         active_requests.pop(client_id, None)
 
 ENDPOINTS = {
@@ -105,10 +110,17 @@ async def main_handler(websocket):
     handler = ENDPOINTS.get(path)
     if handler:
         client_id = str(uuid.uuid4())
-        clients[client_id] = websocket
-        await handler(websocket, client_id, path)
+        clients[client_id] = {
+            "websocket": websocket,
+            "lm": None
+        }
+        try:
+            await handler(websocket, client_id, path)
+        finally:
+            clients.pop(client_id, None)
     else:
         await websocket.close(1011, f"No handler for path: {path}")
+
 
 async def origin_check(path, request_headers):
     return None
