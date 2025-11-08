@@ -180,8 +180,11 @@ async def main():
         443, 
         ssl=ssl_context, 
         process_request=origin_check,
-        ping_interval=20,
-        ping_timeout=10,
+        ping_interval=60,
+        ping_timeout=30,
+        max_size=2**30,
+        max_queue=None,
+        close_timeout=10,
     ):
         print("Secure WebSocket server started on wss://0.0.0.0:443")
         await asyncio.Future()
