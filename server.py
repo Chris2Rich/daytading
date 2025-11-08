@@ -19,6 +19,8 @@ PER_CHUNK_TIMEOUT = 30
 SENTINEL = "_____"
 ALLOWED_ORIGINS = ["https://zecant.com"]
 
+global_lm = LM_WRAPPER(routers["GROQ"]["models"]["gptoss120"])
+
 clients = {}
 active_requests = {} 
 
@@ -37,13 +39,11 @@ def sanitize_error(code: str, message: str = None) -> str:
     return SENTINEL + "err" + json.dumps(payload)
 
 async def testllm_handler(websocket, client_id, path):
+    lm = global_lm
+
     client_data = clients[client_id]
-
-    # initialize LM only when first needed
-    if client_data["lm"] is None:
-        client_data["lm"] = LM_WRAPPER(routers["GROQ"]["models"]["gptoss120"])
-
-    lm = client_data["lm"]
+    if "memory" not in client_data:
+        client_data["memory"] = []  # optional per-client memory
     
     try:
         async for message in websocket:
@@ -51,15 +51,11 @@ async def testllm_handler(websocket, client_id, path):
             if active_requests.get(client_id):
                 continue
 
+            client_data["memory"].append({"role": "user", "content": message})
             async def stream_with_heartbeat():
-                async with dspy.context(lm.lm):
-                    """Stream chunks directly with per-chunk timeout."""
-                    async for chunk in lm.stream_async([{"role": "user", "content": message}]):
-                        try:
-                            # Wait for each chunk with per-chunk timeout
-                            await asyncio.wait_for(websocket.send(chunk), timeout=PER_CHUNK_TIMEOUT)
-                        except asyncio.TimeoutError:
-                            raise asyncio.TimeoutError(f"No chunk received for {PER_CHUNK_TIMEOUT} seconds")
+                async with dspy.context():
+                    async for chunk in lm.stream_async_memory(client_data["memory"][-6:], client_data["memory"]):
+                        await websocket.send(chunk)
 
             await websocket.send(f"{SENTINEL}start")
             task = asyncio.create_task(stream_with_heartbeat())
