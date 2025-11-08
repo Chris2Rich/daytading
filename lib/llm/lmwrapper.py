@@ -56,7 +56,7 @@ class LM_WRAPPER:
                 if provider != "OPENROUTER"
                 else {
                     "HTTP-Referer": "https://api.zecant.com",
-                    "X-Title": "notitleyet",
+                    "X-Title": "Zecant",
                 }
             ),
         )
