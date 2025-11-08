@@ -161,11 +161,11 @@ async def main_handler(websocket):
         active_requests.pop(client_id, None)
 
 
-async def origin_check(path, request_headers):
+async def origin_check(path, request):
     """Enable origin checking for production security"""
     # return None
     
-    origin = request_headers.get("Origin")
+    origin = request.headers.get("Origin")
     if not (origin in ALLOWED_ORIGINS):
         return 403, [], b"Forbidden\n"
     return None
