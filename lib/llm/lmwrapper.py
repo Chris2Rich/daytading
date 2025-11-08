@@ -55,12 +55,12 @@ class LM_WRAPPER:
                 None
                 if provider != "OPENROUTER"
                 else {
-                    "HTTP-Referer": "https://nodomainyet.com",
+                    "HTTP-Referer": "https://api.zecant.com",
                     "X-Title": "notitleyet",
                 }
             ),
         )
-        dspy.configure(self.lm)
+        dspy.configure()
 
         # Store provider configuration for streaming
         self.provider = provider
