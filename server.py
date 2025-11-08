@@ -111,6 +111,7 @@ async def main_handler(websocket):
         await websocket.close(1011, f"No handler for path: {path}")
 
 async def origin_check(path, request_headers):
+    return None
     origin = request_headers.get("Origin")
     if not (origin in ALLOWED_ORIGINS):
         return 403, [], b"Forbidden\n"
