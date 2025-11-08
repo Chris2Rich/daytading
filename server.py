@@ -39,7 +39,7 @@ def sanitize_error(code: str, message: str = None) -> str:
     }
     return SENTINEL + "err" + json.dumps(payload)
 
-async def testllm_handler(websocket, client_id, path):
+async def rawllm_handler(websocket, client_id, path):
     client_data = clients[client_id]
     if "memory" not in client_data:
         client_data["memory"] = []
@@ -131,7 +131,7 @@ async def testllm_handler(websocket, client_id, path):
         active_requests.pop(client_id, None)
 
 ENDPOINTS = {
-    "/testllm": {"fn": testllm_handler, "lm": True},
+    "/rawllm": {"fn": rawllm_handler, "lm": True},
 }
 
 async def main_handler(websocket):
