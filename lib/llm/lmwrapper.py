@@ -103,42 +103,41 @@ class LM_WRAPPER:
             "stream": True,
         }
 
-        async with dspy.context():
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        self.base_url,
-                        headers=headers,
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        if response.status != 200:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.base_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        try:
+                            error_text = await response.text()
+                        except Exception as err:
+                            error_text = f"(failed to read error body: {err})"
+                        raise Exception(
+                            f"API request failed with status {response.status}: {error_text or '(no response body)'}"
+                        )
+
+                    async for line in response.content:
+                        line = line.decode("utf-8").strip()
+                        if line.startswith("data: "):
+                            data = line[6:]  # Remove 'data: ' prefix
+                            if data.strip() == "[DONE]":
+                                break
+
                             try:
-                                error_text = await response.text()
-                            except Exception as err:
-                                error_text = f"(failed to read error body: {err})"
-                            raise Exception(
-                                f"API request failed with status {response.status}: {error_text or '(no response body)'}"
-                            )
+                                chunk = json.loads(data)
+                                if "choices" in chunk and len(chunk["choices"]) > 0:
+                                    delta = chunk["choices"][0].get("delta", {})
+                                    if "content" in delta:
+                                        yield delta["content"]
+                            except json.JSONDecodeError:
+                                continue
 
-                        async for line in response.content:
-                            line = line.decode("utf-8").strip()
-                            if line.startswith("data: "):
-                                data = line[6:]  # Remove 'data: ' prefix
-                                if data.strip() == "[DONE]":
-                                    break
-
-                                try:
-                                    chunk = json.loads(data)
-                                    if "choices" in chunk and len(chunk["choices"]) > 0:
-                                        delta = chunk["choices"][0].get("delta", {})
-                                        if "content" in delta:
-                                            yield delta["content"]
-                                except json.JSONDecodeError:
-                                    continue
-
-            except aiohttp.ClientError as e:
-                raise Exception(f"Async streaming request failed: {e}")
+        except aiohttp.ClientError as e:
+            raise Exception(f"Async streaming request failed: {e}")
 
     async def stream_async_memory(self, messages: list, memory: list, max_tokens: int = 4000):
         """
