@@ -15,6 +15,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 from llm.lmwrapper import LM_WRAPPER, routers
 
 PER_CHUNK_TIMEOUT = 30
+GENERATION_TIMEOUT = 600
+
 MAX_MEMORY_MESSAGES = 50
 
 SENTINEL = "_____"
@@ -34,6 +36,7 @@ def sanitize_error(code: str, message: str = None) -> str:
     """Return a JSON string with a safe error message for the client."""
     error_messages = {
         "TIMEOUT_PER_CHUNK": f"No chunk received for {PER_CHUNK_TIMEOUT}s",
+        "TIMEOUT_GENERATION": f"Total generation exceeded limit of {GENERATION_TIMEOUT}s",
         "UNKNOWN_ERROR": "An unexpected server error occurred",
         "BUSY": "A previous request is still in progress"
     }
@@ -61,36 +64,33 @@ async def rawllm_handler(websocket, client_id, path):
             client_data["memory"].append({"role": "user", "content": message})
             
             async def stream_with_timeout():
-                """Stream with per-chunk timeout monitoring"""
-                last_chunk_time = asyncio.get_event_loop().time()
-                
+                """Stream with per-chunk timeout monitoring"""      
                 async for chunk in lm.stream_async_memory(
                     client_data["memory"][-6:], 
                     client_data["memory"]
                 ):
                     await websocket.send(chunk)
-                    last_chunk_time = asyncio.get_event_loop().time()
-                
+
             await websocket.send(f"{SENTINEL}start")
             
             try:
                 task = asyncio.create_task(stream_with_timeout())
                 active_requests[client_id] = task
-                
-                await asyncio.wait_for(task, timeout=PER_CHUNK_TIMEOUT * 10)
-                
-            except asyncio.TimeoutError:
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                
-                await websocket.send(sanitize_error("TIMEOUT_PER_CHUNK"))
-                
-                if client_data["memory"] and client_data["memory"][-1]["role"] == "assistant":
-                    client_data["memory"].pop()
+
+                try:
+                    await asyncio.wait_for(task, timeout=GENERATION_TIMEOUT)
+                except asyncio.TimeoutError:
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    await websocket.send(sanitize_error("TIMEOUT_GENERATION"))
+
+                    # remove last assistant message if it exists
+                    if client_data["memory"] and client_data["memory"][-1]["role"] == "assistant":
+                        client_data["memory"].pop()
 
             except Exception as e:
                 if not task.done():
