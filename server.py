@@ -45,13 +45,14 @@ async def testllm_handler(websocket, client_id, path):
                 continue
 
             async def stream_with_heartbeat():
-                """Stream chunks directly with per-chunk timeout."""
-                async for chunk in lm.stream_async([{"role": "user", "content": message}]):
-                    try:
-                        # Wait for each chunk with per-chunk timeout
-                        await asyncio.wait_for(websocket.send(chunk), timeout=PER_CHUNK_TIMEOUT)
-                    except asyncio.TimeoutError:
-                        raise asyncio.TimeoutError(f"No chunk received for {PER_CHUNK_TIMEOUT} seconds")
+                async with dspy.context(lm.lm):
+                    """Stream chunks directly with per-chunk timeout."""
+                    async for chunk in lm.stream_async([{"role": "user", "content": message}]):
+                        try:
+                            # Wait for each chunk with per-chunk timeout
+                            await asyncio.wait_for(websocket.send(chunk), timeout=PER_CHUNK_TIMEOUT)
+                        except asyncio.TimeoutError:
+                            raise asyncio.TimeoutError(f"No chunk received for {PER_CHUNK_TIMEOUT} seconds")
 
             await websocket.send(f"{SENTINEL}start")
             task = asyncio.create_task(stream_with_heartbeat())
