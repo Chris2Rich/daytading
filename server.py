@@ -9,7 +9,6 @@ import traceback
 import aiohttp
 import json
 
-# Add the lib directory to the path to import lmwrapper
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
 from llm.lmwrapper import LM_WRAPPER, routers
@@ -17,9 +16,10 @@ from llm.lmwrapper import LM_WRAPPER, routers
 PER_CHUNK_TIMEOUT = 30
 
 SENTINEL = "_____"
+ALLOWED_ORIGINS = ["https://zecant.com"]
 
 clients = {}
-active_requests = {}  # Track active requests per client
+active_requests = {} 
 
 def sanitize_error(code: str, message: str = None) -> str:
     """Return a JSON string with a safe error message for the client."""
@@ -109,6 +109,12 @@ async def main_handler(websocket):
     else:
         await websocket.close(1011, f"No handler for path: {path}")
 
+async def origin_check(path, request_headers):
+    origin = request_headers.get("Origin")
+    if not (origin in ALLOWED_ORIGINS):
+        return 403, [], b"Forbidden\n"
+    return None
+
 async def main():
     cert_path = pathlib.Path(__file__).with_name("cert.pem")
     key_path = pathlib.Path(__file__).with_name("key.pem")
@@ -116,7 +122,7 @@ async def main():
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(cert_path, key_path)
 
-    async with websockets.serve(main_handler, "0.0.0.0", 443, ssl=ssl_context):
+    async with websockets.serve(main_handler, "0.0.0.0", 443, ssl=ssl_context, process_request=origin_check):
         print("Secure WebSocket server started on wss://0.0.0.0:443")
         await asyncio.Future()
 
