@@ -14,9 +14,6 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
 from llm.lmwrapper import LM_WRAPPER, routers
 
-PER_CHUNK_TIMEOUT = 30
-GENERATION_TIMEOUT = 600
-
 MAX_MEMORY_MESSAGES = 50
 
 SENTINEL = "_____"
@@ -63,7 +60,7 @@ async def rawllm_handler(websocket, client_id, path):
             
             client_data["memory"].append({"role": "user", "content": message})
             
-            async def stream_with_timeout():
+            async def stream_response():
                 """Stream with per-chunk timeout monitoring"""      
                 async for chunk in lm.stream_async_memory(
                     client_data["memory"][-6:], 
@@ -74,23 +71,13 @@ async def rawllm_handler(websocket, client_id, path):
             await websocket.send(f"{SENTINEL}start")
             
             try:
-                task = asyncio.create_task(stream_with_timeout())
+                task = asyncio.create_task(stream_response())
                 active_requests[client_id] = task
+                await task
 
-                try:
-                    await asyncio.wait_for(task, timeout=GENERATION_TIMEOUT)
-                except asyncio.TimeoutError:
-                    if not task.done():
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
-                    await websocket.send(sanitize_error("TIMEOUT_GENERATION"))
-
-                    # remove last assistant message if it exists
-                    if client_data["memory"] and client_data["memory"][-1]["role"] == "assistant":
-                        client_data["memory"].pop()
+                # remove last assistant message if it exists
+                if client_data["memory"] and client_data["memory"][-1]["role"] == "assistant":
+                    client_data["memory"].pop()
 
             except Exception as e:
                 if not task.done():
