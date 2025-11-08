@@ -53,7 +53,7 @@ async def testllm_handler(websocket, client_id, path):
 
             client_data["memory"].append({"role": "user", "content": message})
             async def stream_with_heartbeat():
-                async with dspy.context():
+                with dspy.context():
                     async for chunk in lm.stream_async_memory(client_data["memory"][-6:], client_data["memory"]):
                         await websocket.send(chunk)
 
