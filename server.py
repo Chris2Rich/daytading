@@ -59,8 +59,7 @@ async def rawllm_handler(websocket, client_id, path):
             
             client_data["memory"].append({"role": "user", "content": message})
             
-            async def stream_response():
-                """Stream with per-chunk timeout monitoring"""      
+            async def stream_response():    
                 async for chunk in lm.stream_async_memory(
                     client_data["memory"][-6:], 
                     client_data["memory"]
@@ -111,6 +110,8 @@ async def rawllm_handler(websocket, client_id, path):
                 finally:
                     active_requests[client_id] = None
         
+        print(client_id, client_data["memory"])
+
     except websockets.exceptions.ConnectionClosedError:
         pass
     except websockets.exceptions.ConnectionClosedOK:
