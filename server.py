@@ -44,12 +44,17 @@ def sanitize_error(code: str, message: str = None) -> str:
     return SENTINEL + "err" + json.dumps(payload)
 
 async def safe_send(ws, data):
-    if ws.close_code is not None or ws.close_rcvd or ws.close_sent:
-        return
+    """
+    Attempt to send `data`. If the connection is closed, swallow the exception
+    and return False; otherwise return True.
+    """
     try:
         await ws.send(data)
-    except websockets.exceptions.ConnectionClosed:
-        pass
+        return True
+    except (websockets.exceptions.ConnectionClosedOK,
+            websockets.exceptions.ConnectionClosedError,
+            websockets.exceptions.ConnectionClosed) as exc:
+        return False
 
 async def rawllm_handler(websocket, client_id, path):
     client_data = clients[client_id]
@@ -74,12 +79,13 @@ async def rawllm_handler(websocket, client_id, path):
                         client_data["memory"][-6:],
                         client_data["memory"]
                     ):
-                        if websocket.close_code is not None or websocket.close_rcvd or websocket.close_sent:
+                        ok = await safe_send(websocket, chunk)
+                        if not ok:
                             break
-                        await safe_send(websocket, chunk)
-
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
-                    pass
+                    traceback.print_exc()
 
             await safe_send(websocket, f"{SENTINEL}start")
 
