@@ -44,7 +44,7 @@ def sanitize_error(code: str, message: str = None) -> str:
     return SENTINEL + "err" + json.dumps(payload)
 
 async def safe_send(ws, data):
-    if ws.closed:
+    if ws.close_code is not None or ws.close_rcvd or ws.close_sent:
         return
     try:
         await ws.send(data)
@@ -74,7 +74,7 @@ async def rawllm_handler(websocket, client_id, path):
                         client_data["memory"][-6:],
                         client_data["memory"]
                     ):
-                        if websocket.closed:
+                        if websocket.close_code is not None or websocket.close_rcvd or websocket.close_sent:
                             break
                         await safe_send(websocket, chunk)
 
