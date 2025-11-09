@@ -43,42 +43,57 @@ def sanitize_error(code: str, message: str = None) -> str:
     }
     return SENTINEL + "err" + json.dumps(payload)
 
+async def safe_send(ws, data):
+    if ws.closed:
+        return
+    try:
+        await ws.send(data)
+    except websockets.exceptions.ConnectionClosed:
+        pass
+
 async def rawllm_handler(websocket, client_id, path):
     client_data = clients[client_id]
     if "memory" not in client_data:
         client_data["memory"] = []
-    
+
     try:
         async for message in websocket:
+
             if active_requests.get(client_id):
-                await websocket.send(sanitize_error("BUSY"))
+                await safe_send(websocket, sanitize_error("BUSY"))
                 continue
 
             if len(client_data["memory"]) > MAX_MEMORY_MESSAGES:
                 client_data["memory"] = client_data["memory"][-MAX_MEMORY_MESSAGES:]
-            
-            client_data["memory"].append({"role": "user", "content": message})
-            
-            async def stream_response():    
-                async for chunk in lm.stream_async_memory(
-                    client_data["memory"][-6:], 
-                    client_data["memory"]
-                ):
-                    await websocket.send(chunk)
 
-            await websocket.send(f"{SENTINEL}start")
-            
+            client_data["memory"].append({"role": "user", "content": message})
+
+            async def stream_response():
+                try:
+                    async for chunk in lm.stream_async_memory(
+                        client_data["memory"][-6:],
+                        client_data["memory"]
+                    ):
+                        if websocket.closed:
+                            break
+                        await safe_send(websocket, chunk)
+
+                except Exception:
+                    pass
+
+            await safe_send(websocket, f"{SENTINEL}start")
+
             try:
                 task = asyncio.create_task(stream_response())
                 active_requests[client_id] = task
 
                 try:
                     await task
+
                 except asyncio.TimeoutError:
                     if not task.done():
                         task.cancel()
-                    await websocket.send(sanitize_error("TIMEOUT_GENERATION"))
-
+                    await safe_send(websocket, sanitize_error("TIMEOUT_GENERATION"))
                     if client_data["memory"] and client_data["memory"][-1]["role"] == "assistant":
                         client_data["memory"].pop()
 
@@ -89,33 +104,27 @@ async def rawllm_handler(websocket, client_id, path):
                         await task
                     except asyncio.CancelledError:
                         pass
-                
+
                 error_id = str(uuid.uuid4())
                 print(f"Error {error_id}: {type(e).__name__}: {e}")
                 traceback.print_exc()
-                
-                try:
-                    await websocket.send(sanitize_error("UNKNOWN_ERROR", f"Error ID: {error_id}"))
-                except:
-                    pass
-                
+
+                await safe_send(websocket, sanitize_error("UNKNOWN_ERROR", f"Error ID: {error_id}"))
+
                 if client_data["memory"] and client_data["memory"][-1]["role"] == "assistant":
                     client_data["memory"].pop()
 
             finally:
-                try:
-                    await websocket.send(f"{SENTINEL}end")
-                except websockets.exceptions.ConnectionClosed:
-                    pass
-                finally:
-                    active_requests[client_id] = None
-        
+                await safe_send(websocket, f"{SENTINEL}end")
+                active_requests[client_id] = None
+
         print(client_id, client_data["memory"])
 
-    except websockets.exceptions.ConnectionClosedError:
+    except (websockets.exceptions.ConnectionClosedError,
+            websockets.exceptions.ConnectionClosedOK,
+            websockets.exceptions.ConnectionClosed):
         pass
-    except websockets.exceptions.ConnectionClosedOK:
-        pass
+
     finally:
         if client_id in active_requests and active_requests[client_id]:
             task = active_requests[client_id]
