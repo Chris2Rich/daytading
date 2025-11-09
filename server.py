@@ -124,8 +124,6 @@ async def rawllm_handler(websocket, client_id, path):
                 await safe_send(websocket, f"{SENTINEL}end")
                 active_requests[client_id] = None
 
-        print(client_id, client_data["memory"])
-
     except (websockets.exceptions.ConnectionClosedError,
             websockets.exceptions.ConnectionClosedOK,
             websockets.exceptions.ConnectionClosed):
