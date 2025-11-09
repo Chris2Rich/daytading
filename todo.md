@@ -84,3 +84,5 @@ Allows for models to retrieve session information easily - stores session data a
 
 - [ ] create sequence to sequence model to turn queries into steps
 - [ ] semantic caching of requests for analyzer and parameterizer
+
+https://chatgpt.com/c/69111c2c-2250-8329-9275-895687b22829
