@@ -26,10 +26,8 @@ routers = {
         "base_url": "https://api.groq.com/openai/v1/chat/completions",
         "api_key": os.environ["GROQ_TOKEN_DAYTADING"],
         "models": {
-            "kimik2": "moonshotai/kimi-k2-instruct-0905",
             "gptoss120": "openai/gpt-oss-120b",
             "gptoss20": "openai/gpt-oss-20b",
-            "gcompound": "groq/compound",
         },
     },
 }
@@ -110,7 +108,11 @@ class LM_WRAPPER:
                     self.base_url,
                     headers=headers,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=aiohttp.ClientTimeout(
+                        total=300,         # 5 minute absolute maximum
+                        connect=10,        # 10s to connect
+                        sock_read=30       # 30s between chunks
+                    ),
                 ) as response:
                     if response.status != 200:
                         try:
