@@ -24,7 +24,7 @@ ALLOWED_ORIGINS = [
     "http://localhost:3001",
 ]
 
-lm = LM_WRAPPER(routers["GROQ"]["models"]["kimik2"])
+lm = LM_WRAPPER(routers["GROQ"]["models"]["gcompound"])
 
 clients = {}
 active_requests = {} 

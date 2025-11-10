@@ -29,6 +29,7 @@ routers = {
             "kimik2": "moonshotai/kimi-k2-instruct-0905",
             "gptoss120": "openai/gpt-oss-120b",
             "gptoss20": "openai/gpt-oss-20b",
+            "gcompound": "groq/compound",
         },
     },
 }
