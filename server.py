@@ -21,7 +21,6 @@ ALLOWED_ORIGINS = [
     "https://zecant.com",
     "https://www.zecant.com",
     "http://localhost:3000",
-    "http://localhost:3001",
 ]
 
 lm = LM_WRAPPER(routers["GROQ"]["models"]["gptoss120"])
@@ -173,14 +172,10 @@ async def main_handler(websocket):
 
 async def origin_check(path, request):
     """Enable origin checking for production security"""
-    # To disable: just return None
-    # return None
     
     origin = request.headers.get("Origin")
     if origin not in ALLOWED_ORIGINS:
-        # Return proper HTTP response tuple
         return (403, [("Content-Type", "text/plain")], b"Forbidden\n")
-    # Return None to allow connection
     return None
 
 async def main():
