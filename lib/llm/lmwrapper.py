@@ -4,7 +4,7 @@ import requests
 import json
 import asyncio
 import aiohttp
-from typing import AsyncGenerator, Optional, Dict, Any
+from typing import AsyncGenerator, List, Optional, Dict, Any
 
 routers = {
     "OPENROUTER": {
