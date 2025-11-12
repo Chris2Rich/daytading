@@ -1,204 +1,362 @@
 import asyncio
 import ssl
-import websockets
 import pathlib
-import uuid
 import sys
 import os
 import traceback
-import aiohttp
 import json
-import dspy
+from aiohttp import web
+from functools import wraps
+from typing import Optional, List, Dict, Any
+from clerk_backend_api import Clerk
+from clerk_backend_api.jwks_helpers import AuthenticateRequestOptions
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
-from llm.lmwrapper import LM_WRAPPER, routers
+from llm.lmwrapper import LM_WRAPPER_WITH_TOOLS, routers
+from db.database import Database
 
-MAX_MEMORY_MESSAGES = 50
+# Clerk configuration
+CLERK_SECRET_KEY = os.environ.get("CLERK_SECRET_KEY")
+if not CLERK_SECRET_KEY:
+    raise ValueError("CLERK_SECRET_KEY environment variable is required")
 
-SENTINEL = "_____"
-ALLOWED_ORIGINS = [
-    "https://zecant.com",
-    "https://www.zecant.com",
-    "http://localhost:3000",
-]
+# Initialize Clerk SDK
+clerk = Clerk(bearer_auth=CLERK_SECRET_KEY)
 
-lm = LM_WRAPPER(routers["GROQ"]["models"]["gptoss120"])
+# Initialize LLM and Database
+lm = LM_WRAPPER_WITH_TOOLS(routers["GROQ"]["models"]["gptoss120"])
+db = Database()
 
-clients = {}
-active_requests = {} 
 
-def sanitize_error(code: str, message: str = None) -> str:
-    """Return a JSON string with a safe error message for the client."""
-    error_messages = {
-        "TIMEOUT_GENERATION": f"Generation timed out",
-        "UNKNOWN_ERROR": "An unexpected server error occurred",
-        "BUSY": "A previous request is still in progress"
-    }
-    payload = {
-        "type": "error",
-        "code": code,
-        "data": message or error_messages.get(code, "Unknown error")
-    }
-    return SENTINEL + "err" + json.dumps(payload)
-
-async def safe_send(ws, data):
+async def verify_clerk_token(token: str) -> Optional[str]:
     """
-    Attempt to send `data`. If the connection is closed, swallow the exception
-    and return False; otherwise return True.
+    Verify Clerk JWT token using official SDK and return clerk_user_id if valid.
+    Returns None if invalid.
     """
     try:
-        await ws.send(data)
-        return True
-    except (websockets.exceptions.ConnectionClosedOK,
-            websockets.exceptions.ConnectionClosedError,
-            websockets.exceptions.ConnectionClosed) as exc:
-        return False
-
-async def rawllm_handler(websocket, client_id, path):
-    client_data = clients[client_id]
-    if "memory" not in client_data:
-        client_data["memory"] = []
-
-    try:
-        async for message in websocket:
-
-            if active_requests.get(client_id):
-                await safe_send(websocket, sanitize_error("BUSY"))
-                continue
-
-            if len(client_data["memory"]) > MAX_MEMORY_MESSAGES:
-                client_data["memory"] = client_data["memory"][-MAX_MEMORY_MESSAGES:]
-
-            client_data["memory"].append({"role": "user", "content": message})
-
-            async def stream_response():
-                try:
-                    async for chunk in lm.stream_async_memory(
-                        client_data["memory"][-6:],
-                        client_data["memory"]
-                    ):
-                        ok = await safe_send(websocket, chunk)
-                        if not ok:
-                            break
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    traceback.print_exc()
-
-            await safe_send(websocket, f"{SENTINEL}start")
-
-            try:
-                task = asyncio.create_task(stream_response())
-                active_requests[client_id] = task
-
-                try:
-                    await task
-
-                except asyncio.TimeoutError:
-                    if not task.done():
-                        task.cancel()
-                    await safe_send(websocket, sanitize_error("TIMEOUT_GENERATION"))
-                    if client_data["memory"] and client_data["memory"][-1]["role"] == "assistant":
-                        client_data["memory"].pop()
-
-            except Exception as e:
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-
-                error_id = str(uuid.uuid4())
-                print(f"Error {error_id}: {type(e).__name__}: {e}")
-                traceback.print_exc()
-
-                await safe_send(websocket, sanitize_error("UNKNOWN_ERROR", f"Error ID: {error_id}"))
-
-                if client_data["memory"] and client_data["memory"][-1]["role"] == "assistant":
-                    client_data["memory"].pop()
-
-            finally:
-                await safe_send(websocket, f"{SENTINEL}end")
-                active_requests[client_id] = None
-
-    except (websockets.exceptions.ConnectionClosedError,
-            websockets.exceptions.ConnectionClosedOK,
-            websockets.exceptions.ConnectionClosed):
-        pass
-
-    finally:
-        if client_id in active_requests and active_requests[client_id]:
-            task = active_requests[client_id]
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        active_requests.pop(client_id, None)
-
-ENDPOINTS = {
-    "/rawllm": {"fn": rawllm_handler, "lm": True},
-}
-
-async def main_handler(websocket):
-    path = websocket.request.path
-    handler_info = ENDPOINTS.get(path)
-    if not handler_info:
-        await websocket.close(1011, f"No handler for path: {path}")
-        return
-
-    client_id = str(uuid.uuid4())
-    context = dspy.context() if handler_info.get("lm") else None
-
-    clients[client_id] = {
-        "websocket": websocket,
-        "context": context,
-        "memory": [],
-    }
-
-    try:
-        if context:
-            with context:
-                await handler_info["fn"](websocket, client_id, path)
-        else:
-            await handler_info["fn"](websocket, client_id, path)
-    finally:
-        clients.pop(client_id, None)
-        active_requests.pop(client_id, None)
+        # Verify the session token
+        request_state = await asyncio.to_thread(
+            clerk.verify_token,
+            token,
+            AuthenticateRequestOptions()
+        )
+        
+        # Extract user ID from verified token
+        if request_state and hasattr(request_state, 'user_id'):
+            return request_state.user_id
+        
+        # Alternative: decode the claims
+        if request_state and hasattr(request_state, 'claims'):
+            return request_state.claims.get('sub')
+        
+        return None
+        
+    except Exception as e:
+        print(f"Token verification failed: {e}")
+        traceback.print_exc()
+        return None
 
 
-async def origin_check(path, request):
-    """Enable origin checking for production security"""
+def require_auth(handler):
+    """Decorator to require Clerk authentication"""
+    @wraps(handler)
+    async def wrapper(request):
+        auth_header = request.headers.get("Authorization", "")
+        
+        if not auth_header.startswith("Bearer "):
+            return web.json_response(
+                {"error": "Missing or invalid Authorization header"},
+                status=401
+            )
+        
+        token = auth_header[7:]  # Remove "Bearer " prefix
+        clerk_user_id = await verify_clerk_token(token)
+        
+        if not clerk_user_id:
+            return web.json_response(
+                {"error": "Invalid token"},
+                status=401
+            )
+        
+        # Add clerk_user_id to request for use in handler
+        request["clerk_user_id"] = clerk_user_id
+        return await handler(request)
     
-    origin = request.headers.get("Origin")
-    if origin not in ALLOWED_ORIGINS:
-        return (403, [("Content-Type", "text/plain")], b"Forbidden\n")
-    return None
+    return wrapper
+
+
+@require_auth
+async def handle_generate(request):
+    """
+    POST /lm/generate
+    Stream LLM response with SSE
+    
+    Request body: {
+        "message": str,
+        "tools": List[str],
+        "chatid": Optional[str]
+    }
+    """
+    clerk_user_id = request["clerk_user_id"]
+    
+    try:
+        data = await request.json()
+        message = data.get("message", "").strip()
+        tools = data.get("tools", [])
+        chat_id = data.get("chatid")
+        
+        if not message:
+            return web.json_response(
+                {"error": "Message is required"},
+                status=400
+            )
+        
+        # Create new chat if no chat_id provided
+        if not chat_id:
+            chat_id = await db.create_chat(clerk_user_id)
+        else:
+            # Verify chat ownership
+            if not await db.verify_chat_ownership(chat_id, clerk_user_id):
+                return web.json_response(
+                    {"error": "Chat not found or access denied"},
+                    status=403
+                )
+        
+        # Store user message
+        user_message_id = await db.add_message(
+            chat_id=chat_id,
+            clerk_user_id=clerk_user_id,
+            role="user",
+            content=message,
+            tools=tools
+        )
+        
+        # Get full chat history
+        chat_history = await db.get_chat_history(chat_id, clerk_user_id)
+        
+        # Prepare SSE response
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+            }
+        )
+        await response.prepare(request)
+        
+        # Send initial metadata
+        await response.write(
+            f"data: {json.dumps({'type': 'metadata', 'chatid': chat_id, 'message_id': user_message_id})}\n\n".encode()
+        )
+        
+        # Stream LLM response
+        assistant_response = ""
+        try:
+            async for token_data in lm.stream_with_tools_execution(
+                user_message=message,
+                chat_history=chat_history[:-1],  # Exclude the message we just added
+                requested_tools=tools
+            ):
+                if token_data["type"] == "token":
+                    token = token_data["content"]
+                    assistant_response += token
+                    
+                    # Send token via SSE
+                    await response.write(
+                        f"data: {json.dumps({'type': 'token', 'content': token})}\n\n".encode()
+                    )
+                elif token_data["type"] == "tool_call":
+                    # Future: Handle tool calls
+                    await response.write(
+                        f"data: {json.dumps(token_data)}\n\n".encode()
+                    )
+            
+            # Store assistant message
+            assistant_message_id = await db.add_message(
+                chat_id=chat_id,
+                clerk_user_id=clerk_user_id,
+                role="assistant",
+                content=assistant_response
+            )
+            
+            # Send completion event
+            await response.write(
+                f"data: {json.dumps({'type': 'done', 'message_id': assistant_message_id})}\n\n".encode()
+            )
+            
+        except asyncio.CancelledError:
+            # Client disconnected
+            print(f"Client disconnected during streaming for chat {chat_id}")
+        except Exception as e:
+            error_id = str(chat_id)
+            print(f"Error {error_id} during streaming: {e}")
+            traceback.print_exc()
+            
+            await response.write(
+                f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n".encode()
+            )
+        
+        await response.write_eof()
+        return response
+        
+    except json.JSONDecodeError:
+        return web.json_response(
+            {"error": "Invalid JSON in request body"},
+            status=400
+        )
+    except Exception as e:
+        print(f"Error in handle_generate: {e}")
+        traceback.print_exc()
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
+
+
+@require_auth
+async def handle_get_history(request):
+    """
+    GET /lm/gethistory?chatid=<chat_id>
+    Return ordered chat history
+    """
+    clerk_user_id = request["clerk_user_id"]
+    chat_id = request.query.get("chatid")
+    
+    if not chat_id:
+        return web.json_response(
+            {"error": "chatid query parameter is required"},
+            status=400
+        )
+    
+    try:
+        history = await db.get_chat_history(chat_id, clerk_user_id)
+        
+        # Convert datetime objects to ISO format strings
+        for msg in history:
+            if "timestamp" in msg:
+                msg["timestamp"] = msg["timestamp"].isoformat()
+        
+        return web.json_response({
+            "chatid": chat_id,
+            "messages": history
+        })
+        
+    except ValueError as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=404
+        )
+    except PermissionError as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=403
+        )
+    except Exception as e:
+        print(f"Error in handle_get_history: {e}")
+        traceback.print_exc()
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
+
+
+@require_auth
+async def handle_get_chats(request):
+    """
+    GET /lm/chats
+    List all user's chats
+    """
+    clerk_user_id = request["clerk_user_id"]
+    
+    try:
+        chats = await db.get_user_chats(clerk_user_id)
+        
+        # Convert datetime objects to ISO format strings
+        for chat in chats:
+            for key in ["created_at", "updated_at"]:
+                if key in chat and chat[key]:
+                    chat[key] = chat[key].isoformat()
+        
+        return web.json_response({
+            "chats": chats
+        })
+        
+    except Exception as e:
+        print(f"Error in handle_get_chats: {e}")
+        traceback.print_exc()
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
+
+
+async def handle_health(request):
+    """Health check endpoint"""
+    return web.json_response({"status": "ok"})
+
+
+async def on_startup(app):
+    """Initialize database on startup"""
+    await db.initialize()
+    print("Database initialized")
+
+
+async def on_cleanup(app):
+    """Cleanup on shutdown"""
+    await db.close()
+    print("Database connection closed")
+
+
+def create_app():
+    """Create and configure the aiohttp application"""
+    app = web.Application()
+    
+    # Add routes
+    app.router.add_post("/lm/generate", handle_generate)
+    app.router.add_get("/lm/gethistory", handle_get_history)
+    app.router.add_get("/lm/chats", handle_get_chats)
+    app.router.add_get("/health", handle_health)
+    
+    # Add startup/cleanup handlers
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
+    
+    return app
+
 
 async def main():
+    """Run the server with SSL"""
     cert_path = pathlib.Path(__file__).with_name("cert.pem")
     key_path = pathlib.Path(__file__).with_name("key.pem")
-
+    
+    # Create SSL context
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(cert_path, key_path)
+    
+    # Create app
+    app = create_app()
+    
+    # Run server
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    site = web.TCPSite(runner, "0.0.0.0", 443, ssl_context=ssl_context)
+    await site.start()
+    
+    print("SSE Server started on https://0.0.0.0:443")
+    print("Endpoints:")
+    print("  POST /lm/generate")
+    print("  GET  /lm/gethistory?chatid=<id>")
+    print("  GET  /lm/chats")
+    print("  GET  /health")
+    
+    # Keep server running
+    await asyncio.Event().wait()
 
-    async with websockets.serve(
-        main_handler, 
-        "0.0.0.0", 
-        443, 
-        ssl=ssl_context, 
-        process_request=origin_check,
-        ping_interval=60,
-        ping_timeout=30,
-        max_size=2**30,
-        max_queue=None,
-        close_timeout=10,
-    ):
-        print("Secure WebSocket server started on wss://0.0.0.0:443")
-        await asyncio.Future()
 
 if __name__ == "__main__":
     try:

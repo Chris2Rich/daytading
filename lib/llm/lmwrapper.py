@@ -4,8 +4,7 @@ import requests
 import json
 import asyncio
 import aiohttp
-from typing import AsyncGenerator, Generator, Optional, Dict, Any
-
+from typing import AsyncGenerator, Optional, Dict, Any
 
 routers = {
     "OPENROUTER": {
@@ -165,3 +164,167 @@ class LM_WRAPPER:
 
         # After streaming completes, append to memory
         memory.append({"role": "assistant", "content": response_text})
+
+class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
+    """Extended LM wrapper with tool support"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tool_registry = {}
+        self._register_default_tools()
+
+    def _register_default_tools(self):
+        """Register default tool implementations (can be extended later)"""
+        # Tools will be implemented later
+        # For now, just set up the registry structure
+        pass
+
+    def register_tool(self, name: str, func: callable):
+        """Register a custom tool"""
+        self.tool_registry[name] = func
+
+    async def execute_tool(
+        self, 
+        tool_name: str, 
+        parameters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute a tool and return results"""
+        if tool_name not in self.tool_registry:
+            return {
+                "error": f"Tool '{tool_name}' not found",
+                "tool_name": tool_name
+            }
+
+        try:
+            result = await self.tool_registry[tool_name](parameters)
+            return {
+                "success": True,
+                "tool_name": tool_name,
+                "result": result
+            }
+        except Exception as e:
+            return {
+                "error": str(e),
+                "tool_name": tool_name
+            }
+
+    def _format_messages_with_tools(
+        self,
+        messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, str]]:
+        """
+        Format messages from database format to LLM format.
+        Includes tool results inline.
+        """
+        formatted = []
+        
+        for msg in messages:
+            # Basic message
+            formatted.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+
+            # If there are tool results, add them as system messages
+            if msg.get("tool_results"):
+                tool_results_text = self._format_tool_results(msg["tool_results"])
+                formatted.append({
+                    "role": "system",
+                    "content": f"Tool results: {tool_results_text}"
+                })
+
+        return formatted
+
+    def _format_tool_results(self, tool_results: Dict[str, Any]) -> str:
+        """Format tool results for inclusion in context"""
+        try:
+            return json.dumps(tool_results, indent=2)
+        except:
+            return str(tool_results)
+
+    async def stream_async_with_context(
+        self,
+        user_message: str,
+        chat_history: List[Dict[str, Any]],
+        requested_tools: Optional[List[str]] = None,
+        max_tokens: int = 4000
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream response with full chat history context.
+        
+        Args:
+            user_message: Current user message
+            chat_history: Full chat history from database
+            requested_tools: List of tool names user wants available
+            max_tokens: Max tokens to generate
+            
+        Yields:
+            Token chunks from the LLM
+        """
+        # Format chat history
+        formatted_history = self._format_messages_with_tools(chat_history)
+        
+        # Add current user message
+        formatted_history.append({
+            "role": "user",
+            "content": user_message
+        })
+
+        # Add system message about available tools if any
+        if requested_tools:
+            tools_list = ", ".join(requested_tools)
+            formatted_history.insert(0, {
+                "role": "system",
+                "content": f"You have access to the following tools: {tools_list}. "
+                          f"To use a tool, respond with JSON in format: "
+                          f'{{"tool": "tool_name", "parameters": {{"key": "value"}}}}'
+            })
+
+        # Stream from LLM
+        async for token in self.stream_async(formatted_history, max_tokens):
+            yield token
+
+    async def stream_with_tools_execution(
+        self,
+        user_message: str,
+        chat_history: List[Dict[str, Any]],
+        requested_tools: Optional[List[str]] = None,
+        max_tokens: int = 4000,
+        max_tool_iterations: int = 5
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream response and automatically execute tools if requested by LLM.
+        
+        This is a more advanced version that can handle tool calls.
+        For now, it just streams normally - tool execution can be added later.
+        
+        Yields:
+            Dicts with:
+                - {"type": "token", "content": str} for text tokens
+                - {"type": "tool_call", "tool": str, "parameters": dict} for tool calls
+                - {"type": "tool_result", "result": dict} for tool results
+        """
+        response_text = ""
+        
+        async for token in self.stream_async_with_context(
+            user_message,
+            chat_history,
+            requested_tools,
+            max_tokens
+        ):
+            response_text += token
+            yield {
+                "type": "token",
+                "content": token
+            }
+
+        # Future: Parse response_text for tool calls, execute them,
+        # and potentially re-stream with tool results
+        # For now, we just stream the text
+
+    def get_full_response_for_storage(
+        self,
+        streamed_tokens: List[str]
+    ) -> str:
+        """Combine streamed tokens into full response for database storage"""
+        return "".join(streamed_tokens)
