@@ -9,7 +9,6 @@ from aiohttp import web
 from functools import wraps
 from typing import Optional, List, Dict, Any
 from clerk_backend_api import Clerk
-from clerk_backend_api.jwks_helpers import AuthenticateRequestOptions
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
@@ -35,20 +34,20 @@ async def verify_clerk_token(token: str) -> Optional[str]:
     Returns None if invalid.
     """
     try:
-        # Verify the session token
+        # Verify the session token using Clerk's verify_token method
         request_state = await asyncio.to_thread(
             clerk.verify_token,
-            token,
-            AuthenticateRequestOptions()
+            token
         )
         
-        # Extract user ID from verified token
-        if request_state and hasattr(request_state, 'user_id'):
-            return request_state.user_id
-        
-        # Alternative: decode the claims
-        if request_state and hasattr(request_state, 'claims'):
-            return request_state.claims.get('sub')
+        # Extract user ID from the verified token
+        # The SDK returns a RequestState object with claims
+        if request_state:
+            # Try to get user_id from claims (sub claim contains the user ID)
+            if hasattr(request_state, 'sub'):
+                return request_state.sub
+            elif hasattr(request_state, 'claims'):
+                return request_state.claims.get('sub')
         
         return None
         
