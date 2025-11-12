@@ -6,6 +6,6 @@ markdownify
 numpy
 pandas
 requests
-sqlalchemy
-websockets
 yfinance
+clerk-backend-api
+asyncpg
