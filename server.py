@@ -9,6 +9,7 @@ from aiohttp import web
 from functools import wraps
 from typing import Optional, List, Dict, Any
 from clerk_backend_api import Clerk
+import aiohttp_cors
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
@@ -314,6 +315,27 @@ def create_app():
     """Create and configure the aiohttp application"""
     app = web.Application()
     
+    cors = aiohttp_cors.setup(app, defaults={
+        "https://zecant.com": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+            allow_methods=["GET", "POST", "OPTIONS"]
+        ),
+        "https://www.zecant.com": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+            allow_methods=["GET", "POST", "OPTIONS"]
+        ),
+        "http://localhost:3000": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+            allow_methods=["GET", "POST", "OPTIONS"]
+        ),
+    })
+
     # Add routes
     app.router.add_post("/lm/generate", handle_generate)
     app.router.add_get("/lm/gethistory", handle_get_history)
