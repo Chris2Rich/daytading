@@ -398,7 +398,7 @@ async def cors_middleware(request, handler):
             status=200,
             headers={
                 "Access-Control-Allow-Origin": request.headers.get("Origin", "*"),
-                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
                 "Access-Control-Max-Age": "86400",
             }
@@ -455,6 +455,7 @@ async def main():
     print("  POST /lm/generate")
     print("  GET  /lm/gethistory?chatid=<id>")
     print("  GET  /lm/chats")
+    print("  GET  /lm/deletechat?chatid=<id>")
     print("  GET  /health")
     
     # Keep server running
