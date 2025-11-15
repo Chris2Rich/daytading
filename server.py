@@ -242,7 +242,6 @@ async def generate_and_update_title(chat_id: str, first_message: str):
     try:
         title = await lm.generate_title(first_message)
         await db.update_chat_title(chat_id, title)
-        print(f"Generated title for chat {chat_id}: {title}")
     except Exception as e:
         print(f"Error generating title: {e}")
 
