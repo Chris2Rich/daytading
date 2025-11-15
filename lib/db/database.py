@@ -96,50 +96,50 @@ class Database:
             """, chat_id, clerk_user_id, title)
         return chat_id
 
-async def add_message(
-    self,
-    chat_id: str,
-    clerk_user_id: str,
-    role: str,
-    content: str,
-    tools: Optional[List[str]] = None,
-    tool_parameters: Optional[Dict[str, Any]] = None,
-    tool_results: Optional[Dict[str, Any]] = None
-) -> str:
-    """Add a message to a chat"""
-    message_id = str(uuid.uuid4())
-    
-    async with self.pool.acquire() as conn:
-        # Get next sequence number
-        seq_num = await conn.fetchval("""
-            SELECT COALESCE(MAX(sequence_number), 0) + 1
-            FROM messages
-            WHERE chat_id = $1
-        """, chat_id)
+    async def add_message(
+        self,
+        chat_id: str,
+        clerk_user_id: str,
+        role: str,
+        content: str,
+        tools: Optional[List[str]] = None,
+        tool_parameters: Optional[Dict[str, Any]] = None,
+        tool_results: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Add a message to a chat"""
+        message_id = str(uuid.uuid4())
+        
+        async with self.pool.acquire() as conn:
+            # Get next sequence number
+            seq_num = await conn.fetchval("""
+                SELECT COALESCE(MAX(sequence_number), 0) + 1
+                FROM messages
+                WHERE chat_id = $1
+            """, chat_id)
 
-        # Convert lists/dicts to JSON strings
-        tools_json = json.dumps(tools) if tools else None
-        tool_parameters_json = json.dumps(tool_parameters) if tool_parameters else None
-        tool_results_json = json.dumps(tool_results) if tool_results else None
+            # Convert lists/dicts to JSON strings
+            tools_json = json.dumps(tools) if tools else None
+            tool_parameters_json = json.dumps(tool_parameters) if tool_parameters else None
+            tool_results_json = json.dumps(tool_results) if tool_results else None
 
-        # Insert message
-        await conn.execute("""
-            INSERT INTO messages (
-                message_id, chat_id, clerk_user_id, role, content,
-                tools, tool_parameters, tool_results, sequence_number
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        """, message_id, chat_id, clerk_user_id, role, content,
-            tools_json, tool_parameters_json, tool_results_json, seq_num)
+            # Insert message
+            await conn.execute("""
+                INSERT INTO messages (
+                    message_id, chat_id, clerk_user_id, role, content,
+                    tools, tool_parameters, tool_results, sequence_number
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """, message_id, chat_id, clerk_user_id, role, content,
+                tools_json, tool_parameters_json, tool_results_json, seq_num)
 
-        # Update chat updated_at timestamp
-        await conn.execute("""
-            UPDATE chats
-            SET updated_at = NOW()
-            WHERE chat_id = $1
-        """, chat_id)
+            # Update chat updated_at timestamp
+            await conn.execute("""
+                UPDATE chats
+                SET updated_at = NOW()
+                WHERE chat_id = $1
+            """, chat_id)
 
-    return message_id
+        return message_id
 
     async def get_chat_history(
         self, 
