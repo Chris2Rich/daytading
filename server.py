@@ -250,8 +250,15 @@ async def handle_get_history(request):
     try:
         history = await db.get_chat_history(chat_id, clerk_user_id)
         
-        # Convert datetime objects to ISO format strings
+        # Convert datetime and UUID objects to strings
         for msg in history:
+            # Convert UUIDs to strings
+            if "message_id" in msg:
+                msg["message_id"] = str(msg["message_id"])
+            if "chat_id" in msg:
+                msg["chat_id"] = str(msg["chat_id"])
+            
+            # Convert datetime to ISO format
             if "timestamp" in msg:
                 msg["timestamp"] = msg["timestamp"].isoformat()
         
