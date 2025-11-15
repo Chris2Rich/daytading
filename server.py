@@ -83,7 +83,7 @@ def require_auth(handler):
                 status=401
             )
         
-        token = auth_header[7:]  # Remove "Bearer " prefix
+        token = auth_header[7:]
         clerk_user_id = await verify_clerk_token(token)
         
         if not clerk_user_id:
@@ -92,7 +92,9 @@ def require_auth(handler):
                 status=401
             )
         
-        # Add clerk_user_id to request for use in handler
+        # Ensure user exists in database
+        await db.ensure_user(clerk_user_id)
+        
         request["clerk_user_id"] = clerk_user_id
         return await handler(request)
     

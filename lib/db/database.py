@@ -77,6 +77,15 @@ class Database:
                 ON messages(chat_id, sequence_number)
             """)
 
+    async def ensure_user(self, clerk_user_id: str):
+        """Create user if doesn't exist"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO users (clerk_user_id)
+                VALUES ($1)
+                ON CONFLICT (clerk_user_id) DO NOTHING
+            """, clerk_user_id)
+
     async def create_chat(self, clerk_user_id: str, title: Optional[str] = None) -> str:
         """Create a new chat session"""
         chat_id = str(uuid.uuid4())
