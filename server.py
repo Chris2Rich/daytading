@@ -126,10 +126,13 @@ async def handle_generate(request):
                 {"error": "Message is required"},
                 status=400
             )
+
+        is_new_chat = False
         
         # Create new chat if no chat_id provided
         if not chat_id:
             chat_id = await db.create_chat(clerk_user_id)
+            is_new_chat = True
         else:
             # Verify chat ownership
             if not await db.verify_chat_ownership(chat_id, clerk_user_id):
@@ -233,7 +236,7 @@ async def handle_generate(request):
             {"error": "Internal server error"},
             status=500
         )
-        
+
 async def generate_and_update_title(chat_id: str, first_message: str):
     """Background task to generate and update chat title"""
     try:
