@@ -146,33 +146,39 @@ class LM_WRAPPER:
         messages = [
             {
                 "role": "user",
-                "content": f"Create an extremely short title (maximum 8 words) that describes this message:\n\n{first_message}"
+                "content": f"Create a short title (maximum 8 words) that describes this message:\n\n{first_message}\n\nRespond with ONLY the title, nothing else."
             }
         ]
         
         title = ""
+        token_count = 0
         async for token in self.stream_async(messages, max_tokens):
+            print(f"DEBUG Token {token_count}: '{token}'")  # Debug each token
             title += token
+            token_count += 1
 
-        print(f"Title returned from llm: {title}")
+        print(f"DEBUG: Total tokens received: {token_count}")
+        print(f"DEBUG: Raw title from LLM: '{title}'")
         
         # Clean up the title
         title = title.strip()
         
         # Remove common prefixes/wrappers
-        for prefix in ['"', "'", 'Title:', 'title:', '**', '*']:
-            title = title.strip(prefix)
+        for prefix in ['"', "'", 'Title:', 'title:', '**', '*', 'Title: ', 'title: ']:
+            title = title.strip(prefix).strip()
         
-        # Remove quotes at the end
-        title = title.strip('"').strip("'")
+        # Remove newlines
+        title = title.replace('\n', ' ').replace('\r', ' ')
         
         # Limit length
         if len(title) > 60:
-            # Try to break at a word
             title = title[:57].rsplit(' ', 1)[0] + "..."
+        
+        print(f"DEBUG: Cleaned title: '{title}'")
         
         # Fallback if still empty
         if not title or len(title) < 3:
+            print("DEBUG: Title empty or too short, using fallback")
             title = first_message[:50].strip()
             if len(first_message) > 50:
                 title += "..."
