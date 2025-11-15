@@ -278,7 +278,6 @@ async def handle_get_history(request):
             status=500
         )
 
-
 @require_auth
 async def handle_get_chats(request):
     """
@@ -290,8 +289,13 @@ async def handle_get_chats(request):
     try:
         chats = await db.get_user_chats(clerk_user_id)
         
-        # Convert datetime objects to ISO format strings
+        # Convert datetime and UUID objects to strings
         for chat in chats:
+            # Convert UUID to string
+            if "chat_id" in chat:
+                chat["chat_id"] = str(chat["chat_id"])
+            
+            # Convert datetime objects to ISO format strings
             for key in ["created_at", "updated_at"]:
                 if key in chat and chat[key]:
                     chat[key] = chat[key].isoformat()
@@ -307,7 +311,6 @@ async def handle_get_chats(request):
             {"error": "Internal server error"},
             status=500
         )
-
 
 async def handle_health(request):
     """Health check endpoint"""
