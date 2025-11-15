@@ -110,7 +110,7 @@ class LM_WRAPPER:
                     json=payload,
                     timeout=aiohttp.ClientTimeout(
                         total=300,         # 5 minute absolute maximum
-                        connect=10,        # 10s to connect
+                        connect=30,        # 10s to connect
                         sock_read=30       # 30s between chunks
                     ),
                 ) as response:
@@ -272,8 +272,19 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         Yields:
             Token chunks from the LLM
         """
-        # Format chat history
-        formatted_history = self._format_messages_with_tools(chat_history)
+        # Start with system message
+        formatted_history = []
+        
+        # Add tool instructions at the beginning if tools are enabled
+        if requested_tools:
+            tool_instructions = self._get_tool_instructions(requested_tools)
+            formatted_history.append({
+                "role": "system",
+                "content": tool_instructions
+            })
+        
+        # Format and add chat history
+        formatted_history.extend(self._format_messages_with_tools(chat_history))
         
         # Add current user message
         formatted_history.append({
@@ -281,19 +292,42 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             "content": user_message
         })
 
-        # Add system message about available tools if any
-        if requested_tools:
-            tools_list = ", ".join(requested_tools)
-            formatted_history.insert(0, {
-                "role": "system",
-                "content": f"You have access to the following tools: {tools_list}. "
-                          f"To use a tool, respond with JSON in format: "
-                          f'{{"tool": "tool_name", "parameters": {{"key": "value"}}}}'
-            })
-
         # Stream from LLM
         async for token in self.stream_async(formatted_history, max_tokens):
             yield token
+
+    def _get_tool_instructions(self, tools: List[str]) -> str:
+        """Generate system instructions for available tools"""
+        
+        tool_specs = {
+            "stock_chart": """
+            To display an interactive stock price chart, use this format:
+                ":::stock_chart {"ticker": "AAPL", "days": 30}:::"
+            """,
+        }
+        
+        base_instructions = """
+        You are a helpful AI assistant with access to visualization tools.
+
+        IMPORTANT FORMATTING RULES:
+        - For mathematical expressions:
+        * Display math: Use $$...$$ or \\[...\\]
+        * Inline math: Use \\(...\\) ONLY
+        * DO NOT use single dollar signs $...$ for math
+        * Example inline: The angle \\(\\theta\\) is \\(90^\\circ\\)
+        * Example display: $$x^2 + y^2 = r^2$$
+
+        """
+        
+        if tools:
+            base_instructions += "Available visualization tools:\n\n"
+            for tool in tools:
+                if tool in tool_specs:
+                    base_instructions += tool_specs[tool] + "\n"
+            
+            base_instructions += "\nUse these tools when they would help visualize or present data clearly."
+        
+        return base_instructions
 
     async def stream_with_tools_execution(
         self,
