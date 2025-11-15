@@ -438,14 +438,13 @@ async def handle_ticker_data(request):
                 "interval": interval,
                 "data": [
                     {
-                        "date": idx.isoformat(),
-                        "open": row["Open"],
-                        "high": row["High"],
-                        "low": row["Low"],
-                        "close": row["Close"],
-                        "volume": int(row["Volume"]) if "Volume" in row else 0,
+                        "open": float(row["Open"].iloc[0]),
+                        "high": float(row["High"].iloc[0]),
+                        "low": float(row["Low"].iloc[0]),
+                        "close": float(row["Close"].iloc[0]),
+                        "volume": int(row["Volume"].iloc[0]) if "Volume" in row else 0,
                     }
-                    for idx, row in data.astype(float).iterrows()
+                    for idx, row in data.iterrows()
                 ]
             }
             
@@ -479,14 +478,13 @@ async def handle_ticker_data(request):
                 "strike": float(strike),
                 "data": [
                     {
-                        "date": idx.isoformat(),
-                        "open": row["Open"],
-                        "high": row["High"],
-                        "low": row["Low"],
-                        "close": row["Close"],
-                        "volume": int(row["Volume"]) if "Volume" in row else 0,
+                        "open": float(row["Open"].iloc[0]),
+                        "high": float(row["High"].iloc[0]),
+                        "low": float(row["Low"].iloc[0]),
+                        "close": float(row["Close"].iloc[0]),
+                        "volume": int(row["Volume"].iloc[0]) if "Volume" in row else 0,
                     }
-                    for idx, row in data.astype(float).iterrows()
+                    for idx, row in data.iterrows()
                 ]
             }
             
