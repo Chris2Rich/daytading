@@ -177,8 +177,6 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.tool_registry = {}
-        self._register_default_tools()
 
     async def stream_async_with_context(
         self,
