@@ -146,13 +146,15 @@ class LM_WRAPPER:
         messages = [
             {
                 "role": "user",
-                "content": f"Create a short title (maximum 6 words) that describes this message:\n\n{first_message}\n\nTitle:"
+                "content": f"Create an extremely short title (maximum 8 words) that describes this message:\n\n{first_message}"
             }
         ]
         
         title = ""
         async for token in self.stream_async(messages, max_tokens):
             title += token
+
+        print(f"Title returned from llm: {title}")
         
         # Clean up the title
         title = title.strip()
@@ -175,7 +177,6 @@ class LM_WRAPPER:
             if len(first_message) > 50:
                 title += "..."
         
-        print(f"DEBUG: Raw title generated: '{title}'")
         return title
 
 class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
