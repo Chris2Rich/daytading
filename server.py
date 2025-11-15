@@ -16,6 +16,13 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
 from llm.lmwrapper import LM_WRAPPER, LM_WRAPPER_WITH_TOOLS, routers
 from db.database import Database
+from retrieval.yahoofinance import (
+    get_trading, 
+    get_option, 
+    get_option_chain, 
+    get_fundamentals, 
+    get_price_targets
+)
 
 # Clerk configuration
 CLERK_SECRET_KEY = os.environ.get("CLERK_SECRET_KEY")
@@ -373,6 +380,212 @@ async def handle_delete_chat(request):
             status=500
         )
 
+@require_auth
+async def handle_ticker_data(request):
+    """
+    GET /data/tickerdata
+    
+    Query parameters:
+    - action: trading|option|option_chain|fundamentals|price_targets
+    - ticker: Stock symbol (required)
+    
+    For trading:
+    - days: Number of days (default: 30)
+    - interval: 1m|5m|15m|30m|1h|1d|1mo (default: 1d)
+    
+    For option:
+    - expiry: YYMMDD format (required)
+    - direction: C|P (required)
+    - strike: Strike price (required)
+    
+    For option_chain:
+    - expiry: YYMMDD format (required)
+    
+    For fundamentals:
+    - statement_type: income_statement|balance_sheet (required)
+    - period: annual|quarterly (default: annual)
+    """
+    try:
+        action = request.query.get("action")
+        ticker = request.query.get("ticker")
+        
+        if not action:
+            return web.json_response(
+                {"error": "action parameter is required"},
+                status=400
+            )
+        
+        if not ticker:
+            return web.json_response(
+                {"error": "ticker parameter is required"},
+                status=400
+            )
+        
+        # Execute action in thread to avoid blocking
+        if action == "trading":
+            days = int(request.query.get("days", "30"))
+            interval = request.query.get("interval", "1d")
+            
+            data = await asyncio.to_thread(
+                get_trading,
+                ticker,
+                days,
+                interval
+            )
+            
+            # Convert DataFrame to JSON-serializable format
+            result = {
+                "ticker": ticker,
+                "interval": interval,
+                "data": [
+                    {
+                        "date": idx.isoformat(),
+                        "open": float(row["Open"]),
+                        "high": float(row["High"]),
+                        "low": float(row["Low"]),
+                        "close": float(row["Close"]),
+                        "volume": int(row["Volume"]) if "Volume" in row else 0,
+                    }
+                    for idx, row in data.iterrows()
+                ]
+            }
+            
+            return web.json_response(result)
+        
+        elif action == "option":
+            expiry = request.query.get("expiry")
+            direction = request.query.get("direction")
+            strike = request.query.get("strike")
+            
+            if not all([expiry, direction, strike]):
+                return web.json_response(
+                    {"error": "expiry, direction, and strike are required for option"},
+                    status=400
+                )
+            
+            data = await asyncio.to_thread(
+                get_option,
+                ticker,
+                expiry,
+                direction,
+                float(strike)
+            )
+            
+            result = {
+                "ticker": ticker,
+                "expiry": expiry,
+                "direction": direction,
+                "strike": float(strike),
+                "data": [
+                    {
+                        "date": idx.isoformat(),
+                        "open": float(row["Open"]),
+                        "high": float(row["High"]),
+                        "low": float(row["Low"]),
+                        "close": float(row["Close"]),
+                        "volume": int(row["Volume"]) if "Volume" in row else 0,
+                    }
+                    for idx, row in data.iterrows()
+                ]
+            }
+            
+            return web.json_response(result)
+        
+        elif action == "option_chain":
+            expiry = request.query.get("expiry")
+            
+            if not expiry:
+                return web.json_response(
+                    {"error": "expiry is required for option_chain"},
+                    status=400
+                )
+            
+            data = await asyncio.to_thread(
+                get_option_chain,
+                ticker,
+                expiry
+            )
+            
+            return web.json_response({
+                "ticker": ticker,
+                "expiry": expiry,
+                "calls": data["calls"],
+                "puts": data["puts"]
+            })
+        
+        elif action == "fundamentals":
+            statement_type = request.query.get("statement_type")
+            period = request.query.get("period", "annual")
+            
+            if not statement_type:
+                return web.json_response(
+                    {"error": "statement_type is required for fundamentals"},
+                    status=400
+                )
+            
+            data = await asyncio.to_thread(
+                get_fundamentals,
+                ticker,
+                statement_type,
+                period
+            )
+            
+            # Convert timestamps to ISO format
+            formatted_data = {}
+            for key, value in data.items():
+                if hasattr(key, 'isoformat'):
+                    formatted_data[key.isoformat()] = value
+                else:
+                    formatted_data[str(key)] = value
+            
+            return web.json_response({
+                "ticker": ticker,
+                "statement_type": statement_type,
+                "period": period,
+                "data": formatted_data
+            })
+        
+        elif action == "price_targets":
+            data = await asyncio.to_thread(
+                get_price_targets,
+                ticker
+            )
+            
+            # Convert DataFrame to dict if present
+            if 'recommendation_history' in data and hasattr(data['recommendation_history'], 'to_dict'):
+                data['recommendation_history'] = data['recommendation_history'].to_dict(orient='records')
+            
+            return web.json_response(data)
+
+        elif action == "key_metrics":
+            period = request.query.get("period", "quarterly")
+        
+            data = await asyncio.to_thread(
+                get_key_metrics_timeseries,
+                ticker,
+                period
+            )
+            
+            return web.json_response({
+                "ticker": ticker,
+                "period": period,
+                "metrics": data
+            })
+                
+        else:
+            return web.json_response(
+                {"error": f"Unknown action: {action}"},
+                status=400
+            )
+    
+    except Exception as e:
+        print(f"Error in handle_ticker_data: {e}")
+        traceback.print_exc()
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
 async def handle_health(request):
     """Health check endpoint"""
     return web.json_response({"status": "ok"})
@@ -422,6 +635,9 @@ def create_app():
     app.router.add_get("/lm/gethistory", handle_get_history)
     app.router.add_get("/lm/chats", handle_get_chats)
     app.router.add_delete("/lm/deletechat", handle_delete_chat)
+
+    app.router.add_get("/data/tickerdata", handle_ticker_data)
+
     app.router.add_get("/health", handle_health)
     
     # Add startup/cleanup handlers
