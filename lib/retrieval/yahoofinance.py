@@ -7,7 +7,7 @@ from markdownify import markdownify as md
 
 def get_trading(ticker: str, days: int, interval: str):
     period = f"{min(days, 7)}d" if interval != "1d" and interval != "1mo" else f"{days * 2}d"
-    data = yf.download(ticker, period=period, interval=interval)
+    data = yf.download(ticker, period=period, interval=interval, auto_adjust=True)
     if interval != "1d":
         cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
         data = data[data.index >= pd.to_datetime(cutoff)]

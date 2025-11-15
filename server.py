@@ -128,8 +128,6 @@ async def handle_generate(request):
         message = data.get("message", "").strip()
         tools = data.get("tools", [])
         chat_id = data.get("chatid")
-        
-        print(tools)
 
         if not message:
             return web.json_response(
@@ -452,6 +450,8 @@ async def handle_ticker_data(request):
             }
             
             return web.json_response(result)
+
+        
         
         elif action == "option":
             expiry = request.query.get("expiry")
@@ -480,13 +480,13 @@ async def handle_ticker_data(request):
                 "data": [
                     {
                         "date": idx.isoformat(),
-                        "open": float(row["Open"]),
-                        "high": float(row["High"]),
-                        "low": float(row["Low"]),
-                        "close": float(row["Close"]),
+                        "open": row["Open"],
+                        "high": row["High"],
+                        "low": row["Low"],
+                        "close": row["Close"],
                         "volume": int(row["Volume"]) if "Volume" in row else 0,
                     }
-                    for idx, row in data.iterrows()
+                    for idx, row in data.astype(float).iterrows()
                 ]
             }
             
