@@ -9,7 +9,8 @@ from aiohttp import web
 from functools import wraps
 from typing import Optional, List, Dict, Any
 from clerk_backend_api import Clerk
-import aiohttp_cors
+import jwt
+from jwt import PyJWKClient
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
@@ -24,6 +25,9 @@ if not CLERK_SECRET_KEY:
 # Initialize Clerk SDK
 clerk = Clerk(bearer_auth=CLERK_SECRET_KEY)
 
+# Initialize JWKS client for token verification
+jwks_client = PyJWKClient(CLERK_JWKS_URL)
+
 # Initialize LLM and Database
 lm = LM_WRAPPER_WITH_TOOLS(routers["GROQ"]["models"]["gptoss120"])
 db = Database()
@@ -31,27 +35,35 @@ db = Database()
 
 async def verify_clerk_token(token: str) -> Optional[str]:
     """
-    Verify Clerk JWT token using official SDK and return clerk_user_id if valid.
+    Verify Clerk JWT token and return clerk_user_id if valid.
     Returns None if invalid.
     """
     try:
-        # Verify the session token using Clerk's verify_token method
-        request_state = await asyncio.to_thread(
-            clerk.verify_token,
+        # Get signing key from JWKS
+        signing_key = await asyncio.to_thread(
+            jwks_client.get_signing_key_from_jwt,
             token
         )
         
-        # Extract user ID from the verified token
-        # The SDK returns a RequestState object with claims
-        if request_state:
-            # Try to get user_id from claims (sub claim contains the user ID)
-            if hasattr(request_state, 'sub'):
-                return request_state.sub
-            elif hasattr(request_state, 'claims'):
-                return request_state.claims.get('sub')
+        # Verify and decode the token
+        decoded = await asyncio.to_thread(
+            jwt.decode,
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            options={"verify_exp": True}
+        )
         
+        # Extract user ID from 'sub' claim
+        clerk_user_id = decoded.get("sub")
+        return clerk_user_id
+        
+    except jwt.ExpiredSignatureError:
+        print("Token has expired")
         return None
-        
+    except jwt.InvalidTokenError as e:
+        print(f"Invalid token: {e}")
+        return None
     except Exception as e:
         print(f"Token verification failed: {e}")
         traceback.print_exc()
@@ -337,7 +349,7 @@ async def cors_middleware(request, handler):
 def create_app():
     """Create and configure the aiohttp application"""
     app = web.Application(middlewares=[cors_middleware])
-    
+
     # Add routes
     app.router.add_post("/lm/generate", handle_generate)
     app.router.add_get("/lm/gethistory", handle_get_history)

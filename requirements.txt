@@ -9,4 +9,4 @@ requests
 yfinance
 clerk-backend-api
 asyncpg
-aiohttp_cors
+pyjwt[crypto]
