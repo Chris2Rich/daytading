@@ -19,6 +19,7 @@ from db.database import Database
 
 # Clerk configuration
 CLERK_SECRET_KEY = os.environ.get("CLERK_SECRET_KEY")
+CLERK_JWKS_URL = "https://artistic-hedgehog-31.clerk.accounts.dev/.well-known/jwks.json"
 if not CLERK_SECRET_KEY:
     raise ValueError("CLERK_SECRET_KEY environment variable is required")
 
@@ -27,7 +28,6 @@ clerk = Clerk(bearer_auth=CLERK_SECRET_KEY)
 
 # Initialize JWKS client for token verification
 jwks_client = PyJWKClient(CLERK_JWKS_URL)
-CLERK_JWKS_URL = "https://artistic-hedgehog-31.clerk.accounts.dev/.well-known/jwks.json"
 
 # Initialize LLM and Database
 lm = LM_WRAPPER_WITH_TOOLS(routers["GROQ"]["models"]["gptoss120"])
