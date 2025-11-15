@@ -14,7 +14,7 @@ from jwt import PyJWKClient
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
-from llm.lmwrapper import LM_WRAPPER_WITH_TOOLS, routers
+from llm.lmwrapper import LM_WRAPPER, LM_WRAPPER_WITH_TOOLS, routers
 from db.database import Database
 
 # Clerk configuration
@@ -31,6 +31,7 @@ jwks_client = PyJWKClient(CLERK_JWKS_URL)
 
 # Initialize LLM and Database
 lm = LM_WRAPPER_WITH_TOOLS(routers["GROQ"]["models"]["gptoss120"])
+titlelm = LM_WRAPPER(routers["GROQ"]["models"]["gptoss120"])
 db = Database()
 
 
@@ -240,7 +241,7 @@ async def handle_generate(request):
 async def generate_and_update_title(chat_id: str, first_message: str):
     """Background task to generate and update chat title"""
     try:
-        title = await lm.generate_title(first_message)
+        title = await titlelm.generate_title(first_message)
         await db.update_chat_title(chat_id, title)
         print(f"Generated title: {title}")
     except Exception as e:
@@ -333,6 +334,45 @@ async def handle_get_chats(request):
             status=500
         )
 
+@require_auth
+async def handle_delete_chat(request):
+    """
+    DELETE /lm/deletechat?chatid=<chat_id>
+    Delete a chat and all its messages
+    """
+    clerk_user_id = request["clerk_user_id"]
+    chat_id = request.query.get("chatid")
+    
+    if not chat_id:
+        return web.json_response(
+            {"error": "chatid query parameter is required"},
+            status=400
+        )
+    
+    try:
+        # Verify chat ownership
+        if not await db.verify_chat_ownership(chat_id, clerk_user_id):
+            return web.json_response(
+                {"error": "Chat not found or access denied"},
+                status=403
+            )
+        
+        # Delete the chat (messages will cascade delete)
+        await db.delete_chat(chat_id)
+        
+        return web.json_response({
+            "success": True,
+            "chatid": chat_id
+        })
+        
+    except Exception as e:
+        print(f"Error in handle_delete_chat: {e}")
+        traceback.print_exc()
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
+
 async def handle_health(request):
     """Health check endpoint"""
     return web.json_response({"status": "ok"})
@@ -381,6 +421,7 @@ def create_app():
     app.router.add_post("/lm/generate", handle_generate)
     app.router.add_get("/lm/gethistory", handle_get_history)
     app.router.add_get("/lm/chats", handle_get_chats)
+    app.router.add_delete("/lm/deletechat", handle_delete_chat)
     app.router.add_get("/health", handle_health)
     
     # Add startup/cleanup handlers

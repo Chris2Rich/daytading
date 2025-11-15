@@ -25,6 +25,7 @@ routers = {
         "base_url": "https://api.groq.com/openai/v1/chat/completions",
         "api_key": os.environ["GROQ_TOKEN_DAYTADING"],
         "models": {
+            "llama8b": "llama-3.1-8b-instant",
             "gptoss120": "openai/gpt-oss-120b",
             "gptoss20": "openai/gpt-oss-20b",
         },

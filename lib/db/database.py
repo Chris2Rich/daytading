@@ -200,6 +200,14 @@ class Database:
             """, chat_id)
             return exists
 
+    async def delete_chat(self, chat_id: str):
+        """Delete a chat (messages will cascade delete due to foreign key)"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                DELETE FROM chats
+                WHERE chat_id = $1
+            """, chat_id)
+
     async def update_chat_title(self, chat_id: str, title: str):
         """Update the title of a chat"""
         async with self.pool.acquire() as conn:
