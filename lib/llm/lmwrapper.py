@@ -141,7 +141,7 @@ class LM_WRAPPER:
         except aiohttp.ClientError as e:
             raise Exception(f"Async streaming request failed: {e}")
 
-    async def generate_title(self, first_message: str, max_tokens: int = 50) -> str:
+    async def generate_title(self, first_message: str, max_tokens: int = 400) -> str:
         """Generate a short title for a chat based on the first message."""
         messages = [
             {
