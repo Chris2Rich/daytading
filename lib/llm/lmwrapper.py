@@ -141,29 +141,40 @@ class LM_WRAPPER:
         except aiohttp.ClientError as e:
             raise Exception(f"Async streaming request failed: {e}")
 
-    async def stream_async_memory(self, messages: list, memory: list, max_tokens: int = 4000):
+    async def generate_title(self, first_message: str, max_tokens: int = 20) -> str:
         """
-        Stream tokens asynchronously and automatically append final response to memory.
-
+        Generate a short title for a chat based on the first message.
+        
         Args:
-            messages: List of messages (user + assistant) to send to LM
-            memory: List[dict] that represents the conversation history
-            max_tokens: Maximum tokens to generate
-
-        Yields:
-            str: individual token chunks from LM as they are generated
-
-        Side effect:
-            Appends {"role": "assistant", "content": response_text} to memory after streaming completes.
+            first_message: The user's first message in the chat
+            max_tokens: Maximum tokens for the title
+            
+        Returns:
+            A short, descriptive title (3-6 words)
         """
-        response_text = ""
-
+        messages = [
+            {
+                "role": "system",
+                "content": "Generate a very short, descriptive title (3-6 words) for a conversation that starts with the following message. Reply with ONLY the title, no quotes or explanation."
+            },
+            {
+                "role": "user",
+                "content": first_message
+            }
+        ]
+        
+        title = ""
         async for token in self.stream_async(messages, max_tokens):
-            response_text += token
-            yield token
-
-        # After streaming completes, append to memory
-        memory.append({"role": "assistant", "content": response_text})
+            title += token
+        
+        # Clean up the title
+        title = title.strip().strip('"').strip("'")
+        
+        # Limit length
+        if len(title) > 60:
+            title = title[:57] + "..."
+        
+        return title
 
 class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
     """Extended LM wrapper with tool support"""

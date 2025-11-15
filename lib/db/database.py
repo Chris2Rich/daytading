@@ -199,3 +199,12 @@ class Database:
                 SELECT EXISTS(SELECT 1 FROM chats WHERE chat_id = $1)
             """, chat_id)
             return exists
+
+    async def update_chat_title(self, chat_id: str, title: str):
+        """Update the title of a chat"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE chats
+                SET title = $1
+                WHERE chat_id = $2
+            """, title, chat_id)

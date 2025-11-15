@@ -197,6 +197,9 @@ async def handle_generate(request):
                 role="assistant",
                 content=assistant_response
             )
+
+            if is_new_chat:
+                asyncio.create_task(generate_and_update_title(chat_id, message))
             
             # Send completion event
             await response.write(
@@ -230,7 +233,15 @@ async def handle_generate(request):
             {"error": "Internal server error"},
             status=500
         )
-
+        
+async def generate_and_update_title(chat_id: str, first_message: str):
+    """Background task to generate and update chat title"""
+    try:
+        title = await lm.generate_title(first_message)
+        await db.update_chat_title(chat_id, title)
+        print(f"Generated title for chat {chat_id}: {title}")
+    except Exception as e:
+        print(f"Error generating title: {e}")
 
 @require_auth
 async def handle_get_history(request):
