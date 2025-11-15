@@ -141,25 +141,12 @@ class LM_WRAPPER:
         except aiohttp.ClientError as e:
             raise Exception(f"Async streaming request failed: {e}")
 
-    async def generate_title(self, first_message: str, max_tokens: int = 20) -> str:
-        """
-        Generate a short title for a chat based on the first message.
-        
-        Args:
-            first_message: The user's first message in the chat
-            max_tokens: Maximum tokens for the title
-            
-        Returns:
-            A short, descriptive title (3-6 words)
-        """
+    async def generate_title(self, first_message: str, max_tokens: int = 50) -> str:
+        """Generate a short title for a chat based on the first message."""
         messages = [
             {
-                "role": "system",
-                "content": "Generate a very short, descriptive title (3-6 words) for a conversation that starts with the following message. Reply with ONLY the title, no quotes or explanation."
-            },
-            {
                 "role": "user",
-                "content": first_message
+                "content": f"Create a short title (maximum 6 words) that describes this message:\n\n{first_message}\n\nTitle:"
             }
         ]
         
@@ -168,12 +155,27 @@ class LM_WRAPPER:
             title += token
         
         # Clean up the title
-        title = title.strip().strip('"').strip("'")
+        title = title.strip()
+        
+        # Remove common prefixes/wrappers
+        for prefix in ['"', "'", 'Title:', 'title:', '**', '*']:
+            title = title.strip(prefix)
+        
+        # Remove quotes at the end
+        title = title.strip('"').strip("'")
         
         # Limit length
         if len(title) > 60:
-            title = title[:57] + "..."
+            # Try to break at a word
+            title = title[:57].rsplit(' ', 1)[0] + "..."
         
+        # Fallback if still empty
+        if not title or len(title) < 3:
+            title = first_message[:50].strip()
+            if len(first_message) > 50:
+                title += "..."
+        
+        print(f"DEBUG: Raw title generated: '{title}'")
         return title
 
 class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
