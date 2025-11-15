@@ -310,32 +310,34 @@ async def on_cleanup(app):
     await db.close()
     print("Database connection closed")
 
+@web.middleware
+async def cors_middleware(request, handler):
+    """Add CORS headers to all responses"""
+    # Handle preflight OPTIONS requests
+    if request.method == "OPTIONS":
+        return web.Response(
+            status=200,
+            headers={
+                "Access-Control-Allow-Origin": request.headers.get("Origin", "*"),
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Max-Age": "86400",
+            }
+        )
+    
+    # Process the request
+    response = await handler(request)
+    
+    # Add CORS headers to response
+    response.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
 
 def create_app():
     """Create and configure the aiohttp application"""
-    app = web.Application()
+    app = web.Application(middlewares=[cors_middleware])
     
-    cors = aiohttp_cors.setup(app, defaults={
-        "https://zecant.com": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-            allow_methods=["GET", "POST", "OPTIONS"]
-        ),
-        "https://www.zecant.com": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-            allow_methods=["GET", "POST", "OPTIONS"]
-        ),
-        "http://localhost:3000": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-            allow_methods=["GET", "POST", "OPTIONS"]
-        ),
-    })
-
     # Add routes
     app.router.add_post("/lm/generate", handle_generate)
     app.router.add_get("/lm/gethistory", handle_get_history)
