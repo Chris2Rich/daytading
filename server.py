@@ -129,6 +129,8 @@ async def handle_generate(request):
         tools = data.get("tools", [])
         chat_id = data.get("chatid")
         
+        print(tools)
+
         if not message:
             return web.json_response(
                 {"error": "Message is required"},

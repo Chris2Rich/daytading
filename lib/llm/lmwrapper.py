@@ -180,75 +180,6 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         self.tool_registry = {}
         self._register_default_tools()
 
-    def _register_default_tools(self):
-        """Register default tool implementations (can be extended later)"""
-        # Tools will be implemented later
-        # For now, just set up the registry structure
-        pass
-
-    def register_tool(self, name: str, func: callable):
-        """Register a custom tool"""
-        self.tool_registry[name] = func
-
-    async def execute_tool(
-        self, 
-        tool_name: str, 
-        parameters: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Execute a tool and return results"""
-        if tool_name not in self.tool_registry:
-            return {
-                "error": f"Tool '{tool_name}' not found",
-                "tool_name": tool_name
-            }
-
-        try:
-            result = await self.tool_registry[tool_name](parameters)
-            return {
-                "success": True,
-                "tool_name": tool_name,
-                "result": result
-            }
-        except Exception as e:
-            return {
-                "error": str(e),
-                "tool_name": tool_name
-            }
-
-    def _format_messages_with_tools(
-        self,
-        messages: List[Dict[str, Any]]
-    ) -> List[Dict[str, str]]:
-        """
-        Format messages from database format to LLM format.
-        Includes tool results inline.
-        """
-        formatted = []
-        
-        for msg in messages:
-            # Basic message
-            formatted.append({
-                "role": msg["role"],
-                "content": msg["content"]
-            })
-
-            # If there are tool results, add them as system messages
-            if msg.get("tool_results"):
-                tool_results_text = self._format_tool_results(msg["tool_results"])
-                formatted.append({
-                    "role": "system",
-                    "content": f"Tool results: {tool_results_text}"
-                })
-
-        return formatted
-
-    def _format_tool_results(self, tool_results: Dict[str, Any]) -> str:
-        """Format tool results for inclusion in context"""
-        try:
-            return json.dumps(tool_results, indent=2)
-        except:
-            return str(tool_results)
-
     async def stream_async_with_context(
         self,
         user_message: str,
@@ -279,9 +210,6 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 "content": tool_instructions
             })
         
-        # Format and add chat history
-        formatted_history.extend(self._format_messages_with_tools(chat_history))
-        
         # Add current user message
         formatted_history.append({
             "role": "user",
@@ -297,8 +225,15 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         
         tool_specs = {
             "stock_chart": """
-            To display an interactive stock price chart, use this format:
-                ":::stock_chart {"ticker": "AAPL", "days": 30}:::"
+            - Tool Name: `stock_chart`
+            - Description: Displays an interactive stock price chart for a given ticker symbol over a specified number of days.
+            - When to use: Use this when the user explicitly asks for a stock chart, price history, or to visualize a stock's performance over time.
+            - Format: :::stock_chart\n{"ticker": "TICKER_SYMBOL", "days": NUMBER_OF_DAYS}\n:::
+            - Example: To show a 90-day chart for Apple Inc., you would output:
+              :::stock_chart
+              {"ticker": "AAPL", "days": 90}
+              :::
+            - Important: Always use a valid JSON object for the parameters. The "ticker" is a string and "days" is a number. Default to 30 days if not specified.
             """,
         }
         
@@ -321,7 +256,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 if tool in tool_specs:
                     base_instructions += tool_specs[tool] + "\n"
             
-            base_instructions += "\nUse these tools when they would help visualize or present data clearly."
+            base_instructions += "\nWhen a tool is appropriate, generate its required markdown block directly in your response. The user's interface will render it."
         
         return base_instructions
 
@@ -358,14 +293,3 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 "type": "token",
                 "content": token
             }
-
-        # Future: Parse response_text for tool calls, execute them,
-        # and potentially re-stream with tool results
-        # For now, we just stream the text
-
-    def get_full_response_for_storage(
-        self,
-        streamed_tokens: List[str]
-    ) -> str:
-        """Combine streamed tokens into full response for database storage"""
-        return "".join(streamed_tokens)
