@@ -156,7 +156,7 @@ class LM_WRAPPER:
             title += token
 
         # Clean up the title
-        title = title.strip()
+        title = title.strip().rstrip()
         
         # Remove common prefixes/wrappers
         for prefix in ['"', "'", 'Title:', 'title:', '**', '*', 'Title: ', 'title: ']:
@@ -164,10 +164,6 @@ class LM_WRAPPER:
         
         # Remove newlines
         title = title.replace('\n', ' ').replace('\r', ' ')
-        
-        # Limit length
-        if len(title) > 60:
-            title = title[:57].rsplit(' ', 1)[0] + "..."
         
         if not title or len(title) < 3:
             title = first_message[:50].strip()
