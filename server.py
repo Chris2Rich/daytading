@@ -481,7 +481,6 @@ async def handle_ticker_data(request):
                 "strike": float(strike),
                 "data": [
                     {
-                        "date": row["Date"].isoformat() if hasattr(row["Date"], 'isoformat') else str(row["Date"]),
                         "open": float(row["Open"].iloc[0]),
                         "high": float(row["High"].iloc[0]),
                         "low": float(row["Low"].iloc[0]),
