@@ -225,7 +225,8 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             "stock_chart": """
             - Tool Name: `stock_chart`
             - Description: Displays an interactive stock price chart for a given ticker symbol over a specified number of days.
-            - When to use: Use this when the user explicitly asks for a stock chart, price history, or to visualize a stock's performance over time.
+            - When to use: Use this when the user asks for a stock chart, price history, or to visualize a stock's performance over time. Even if the user does not explicitly request this, if it would be useful, include a graph.
+            - If user defines a specific duration, make sure to obey that duration.
             - Format: :::stock_chart\n{"ticker": "TICKER_SYMBOL", "days": NUMBER_OF_DAYS}\n:::
             - Example: To show a 90-day chart for Apple Inc., you would output:
               :::stock_chart
