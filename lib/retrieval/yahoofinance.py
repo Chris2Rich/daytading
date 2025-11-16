@@ -12,6 +12,7 @@ def get_trading(ticker: str, days: int, interval: str):
         cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
         data = data[data.index >= pd.to_datetime(cutoff)]
 
+    data = data.reset_index()
     return data
 
 def get_option(ticker: str, expiry: str, direction: str, strike: float):

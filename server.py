@@ -438,6 +438,7 @@ async def handle_ticker_data(request):
                 "interval": interval,
                 "data": [
                     {
+                        "date": row["Date"].isoformat() if hasattr(row["Date"], 'isoformat') else str(row["Date"]),
                         "open": float(row["Open"].iloc[0]),
                         "high": float(row["High"].iloc[0]),
                         "low": float(row["Low"].iloc[0]),
@@ -470,6 +471,8 @@ async def handle_ticker_data(request):
                 direction,
                 float(strike)
             )
+
+            data = data.reset_index()
             
             result = {
                 "ticker": ticker,
@@ -478,6 +481,7 @@ async def handle_ticker_data(request):
                 "strike": float(strike),
                 "data": [
                     {
+                        "date": row["Date"].isoformat() if hasattr(row["Date"], 'isoformat') else str(row["Date"]),
                         "open": float(row["Open"].iloc[0]),
                         "high": float(row["High"].iloc[0]),
                         "low": float(row["Low"].iloc[0]),
