@@ -4,6 +4,8 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
+import os
+os.environ['YFINANCE_QUIET'] = '1'
 
 def get_trading(ticker: str, days: int, interval: str):
     period = f"{min(days, 7)}d" if interval != "1d" and interval != "1mo" else f"{days * 2}d"
