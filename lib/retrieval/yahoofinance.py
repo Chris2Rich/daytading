@@ -8,12 +8,33 @@ import os
 os.environ['YFINANCE_QUIET'] = '1'
 
 def get_trading(ticker: str, days: int, interval: str):
-    period = f"{min(days, 7)}d" if interval != "1d" and interval != "1mo" else f"{days}d"
-    data = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
-    if interval != "1d":
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
-        data = data[data.index >= pd.to_datetime(cutoff)]
-
+    end_date = datetime.now(tz=timezone.utc)
+    
+    # Yahoo Finance has limits on intraday data availability
+    max_days_for_interval = {
+        "1m": 7,
+        "5m": 60,
+        "15m": 60,
+        "30m": 60,
+        "1h": 730,
+        "1d": 10000,  # effectively unlimited
+        "1mo": 10000,
+    }
+    
+    max_days = max_days_for_interval.get(interval, days)
+    actual_days = min(days, max_days)
+    
+    start_date = end_date - timedelta(days=actual_days)
+    
+    data = yf.download(
+        ticker,
+        start=start_date,
+        end=end_date,
+        interval=interval,
+        auto_adjust=True,
+        progress=False
+    )
+    
     return data
 
 def get_option(ticker: str, expiry: str, direction: str, strike: float):
