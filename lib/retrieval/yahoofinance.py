@@ -8,6 +8,17 @@ import os
 os.environ['YFINANCE_QUIET'] = '1'
 
 def get_trading(ticker: str, days: int, interval: str):
+    """
+    Fetch trading data for a ticker.
+    
+    Args:
+        ticker: Stock symbol
+        days: Number of days of data to fetch
+        interval: Data interval - 1m, 5m, 15m, 30m, 1h, 1d, 1wk, 1mo
+    
+    Returns:
+        DataFrame with OHLCV data
+    """
     end_date = datetime.now(tz=timezone.utc)
     
     # Yahoo Finance has limits on intraday data availability
@@ -17,7 +28,8 @@ def get_trading(ticker: str, days: int, interval: str):
         "15m": 60,
         "30m": 60,
         "1h": 730,
-        "1d": 10000,  # effectively unlimited
+        "1d": 10000,
+        "1wk": 10000,
         "1mo": 10000,
     }
     
@@ -36,7 +48,7 @@ def get_trading(ticker: str, days: int, interval: str):
     )
     
     return data
-
+    
 def get_option(ticker: str, expiry: str, direction: str, strike: float):
     optionstring = ticker + expiry + direction + f"{int(strike * 1000):08d}"
     asset = yf.Ticker(optionstring)
