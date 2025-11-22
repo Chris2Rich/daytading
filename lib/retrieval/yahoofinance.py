@@ -8,7 +8,7 @@ import os
 os.environ['YFINANCE_QUIET'] = '1'
 
 def get_trading(ticker: str, days: int, interval: str):
-    period = f"{min(days, 7)}d" if interval != "1d" and interval != "1mo" else f"{days * 2}d"
+    period = f"{min(days, 7)}d" if interval != "1d" and interval != "1mo" else f"{days}d"
     data = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
     if interval != "1d":
         cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
