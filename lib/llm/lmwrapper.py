@@ -6,6 +6,10 @@ import asyncio
 import aiohttp
 from typing import AsyncGenerator, List, Optional, Dict, Any
 
+sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
+
+from lib.retrieval.search import SearchTool
+
 routers = {
     "OPENROUTER": {
         "base_url": "https://openrouter.ai/api/v1/chat/completions",
@@ -177,6 +181,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.search_tool = SearchTool()
 
     async def stream_async_with_context(
         self,

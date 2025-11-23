@@ -1,65 +1,74 @@
-import requests
-from urllib.parse import urljoin
+import os
+import aiohttp
+from typing import Dict, Any, List, Optional
+import json
 
-class SearchEngineWrapper:
-    def __init__(self, base_url="https://northboot.xyz/", user_agent="Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"):
-        self.base_url = base_url.rstrip("/")
-        self.search_path = "/search"  # or "/"
-        self.USER_AGENT = user_agent
-
-    def search(self, query, *,
-        categories=None,
-        engines=None,
-        language=None,
-        page=1,
-        time_range=None,
-        safesearch=None,
-        output_format="json",
-        **extra_params):
+class SearchTool:
+    """Web search tool using Brave Search API"""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.environ.get("BRAVE_TOKEN")
+        self.base_url = "https://api.search.brave.com/res/v1/web/search"
+    
+    async def search(self, query: str, count: int = 5) -> Dict[str, Any]:
         """
-        Perform a synchronous search query.
-
+        Perform web search using Brave Search API
+        
         Args:
-            query (str): Search query string (parameter 'q').
-            categories (list[str], optional): e.g., ['general', 'images'].
-            engines (list[str], optional): e.g., ['google', 'bing'].
-            language (str, optional): e.g., "en", "all".
-            page (int, optional): Page number, default 1.
-            time_range (str, optional): 'day', 'month', 'year'.
-            safesearch (int, optional): 0 = off, 1 = moderate, 2 = strict.
-            output_format (str, optional): 'json', 'csv', 'rss'. Default 'json'.
-            extra_params: Additional query parameters.
-
+            query: Search query string
+            count: Number of results to return (max 20)
+            
         Returns:
-            dict or raw text: Parsed JSON if format is 'json', else raw response.
+            Dict with search results
         """
-        url = urljoin(self.base_url, self.search_path)
-        params = {'q': query, 'format': output_format, 'pageno': page}
-
-        if categories:
-            params['categories'] = ",".join(categories)
-        if engines:
-            params['engines'] = ",".join(engines)
-        if language:
-            params['language'] = language
-        if time_range:
-            params['time_range'] = time_range
-        if safesearch is not None:
-            params['safesearch'] = safesearch
-
-        params.update(extra_params)
-
+        if not self.api_key:
+            raise ValueError("Brave Search API key not found")
+        
         headers = {
-            "User-Agent": self.USER_AGENT
+            "Accept": "application/json",
+            "X-Subscription-Token": self.api_key
         }
-
-        response = requests.get(url, params=params, timeout=10, headers=headers)
-        response.raise_for_status()
-
-        # if output_format == "json":
-        #     return response.json()
-        # else:
-        return response.text
-
-se = SearchEngineWrapper()
-print(se.search("What is the speed of light"))
+        
+        params = {
+            "q": query,
+            "count": min(count, 20),
+            "text_decorations": False,
+            "search_lang": "en"
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.base_url,
+                    headers=headers,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise Exception(f"Search API failed: {response.status} - {error_text}")
+                    
+                    data = await response.json()
+                    return self._format_results(data)
+        
+        except aiohttp.ClientError as e:
+            raise Exception(f"Search request failed: {e}")
+    
+    def _format_results(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Format Brave search results into a clean structure"""
+        results = []
+        
+        if "web" in data and "results" in data["web"]:
+            for item in data["web"]["results"]:
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "description": item.get("description", ""),
+                    "age": item.get("age", "")
+                })
+        
+        return {
+            "query": data.get("query", {}).get("original", ""),
+            "results": results,
+            "total": len(results)
+        }
