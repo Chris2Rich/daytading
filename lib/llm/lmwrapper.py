@@ -242,7 +242,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         
         # Step 1: Check if we should perform a search
         search_results = None
-        if auto_search and self._should_search(user_message):
+        if "search" in requested_tools:
             try:
                 search_query = self._extract_search_query(user_message)
                 search_results = await self.search_tool.multi_search(search_query)
