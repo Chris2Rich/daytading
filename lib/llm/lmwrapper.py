@@ -5,6 +5,7 @@ import json
 import asyncio
 import aiohttp
 from typing import AsyncGenerator, List, Optional, Dict, Any
+import re
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
@@ -15,7 +16,7 @@ routers = {
         "base_url": "https://openrouter.ai/api/v1/chat/completions",
         "api_key": os.environ["OPENROUTER_TOKEN_DAYTADING"],
         "models": {
-            "kimik2": "moonshotai/kimi-k2:free",  # unstable with dspy
+            "kimik2": "moonshotai/kimi-k2:free",
             "horizonbeta": "openrouter/horizon-beta",
             "qwen3coder480b": "qwen/qwen3-coder:free",
             "glm4.5air": "z-ai/glm-4.5-air:free",
@@ -113,9 +114,9 @@ class LM_WRAPPER:
                     headers=headers,
                     json=payload,
                     timeout=aiohttp.ClientTimeout(
-                        total=300,         # 5 minute absolute maximum
-                        connect=30,        # 10s to connect
-                        sock_read=30       # 30s between chunks
+                        total=300,
+                        connect=30,
+                        sock_read=30
                     ),
                 ) as response:
                     if response.status != 200:
@@ -130,7 +131,7 @@ class LM_WRAPPER:
                     async for line in response.content:
                         line = line.decode("utf-8").strip()
                         if line.startswith("data: "):
-                            data = line[6:]  # Remove 'data: ' prefix
+                            data = line[6:]
                             if data.strip() == "[DONE]":
                                 break
 
@@ -159,14 +160,11 @@ class LM_WRAPPER:
         async for token in self.stream_async(messages, max_tokens):
             title += token
 
-        # Clean up the title
         title = title.strip().rstrip()
         
-        # Remove common prefixes/wrappers
         for prefix in ['"', "'", 'Title:', 'title:', '**', '*', 'Title: ', 'title: ']:
             title = title.strip(prefix).strip()
         
-        # Remove newlines
         title = title.replace('\n', ' ').replace('\r', ' ')
         
         if not title or len(title) < 3:
@@ -176,6 +174,7 @@ class LM_WRAPPER:
         
         return title
 
+
 class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
     """Extended LM wrapper with tool support"""
     
@@ -183,29 +182,75 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         super().__init__(*args, **kwargs)
         self.search_tool = SearchTool()
 
+    def _should_search(self, user_message: str) -> bool:
+        """
+        Determine if the user message requires web search.
+        
+        Uses simple heuristics to detect search intent.
+        """
+        search_indicators = [
+            'search', 'find', 'look up', 'what is', "what's", 
+            'who is', 'when did', 'latest', 'recent', 'news',
+            'current', 'today', 'price', 'stock', 'weather'
+        ]
+        
+        message_lower = user_message.lower()
+        return any(indicator in message_lower for indicator in search_indicators)
+    
+    def _extract_search_query(self, user_message: str) -> str:
+        """
+        Extract a clean search query from the user message.
+        
+        Simple extraction - can be enhanced with LLM in future.
+        """
+        # Remove common question words and clean up
+        query = user_message.strip()
+        
+        # Remove question marks and extra whitespace
+        query = query.replace('?', '').strip()
+        
+        # Limit length for search API
+        if len(query) > 100:
+            query = query[:100]
+        
+        return query
+
     async def stream_async_with_context(
         self,
         user_message: str,
         chat_history: List[Dict[str, Any]],
         requested_tools: Optional[List[str]] = None,
-        max_tokens: int = 4000
+        max_tokens: int = 4000,
+        auto_search: bool = True,
+        search_count: int = 5
     ) -> AsyncGenerator[str, None]:
         """
-        Stream response with full chat history context.
+        Stream response with full chat history context and automatic search.
         
         Args:
             user_message: Current user message
             chat_history: Full chat history from database
             requested_tools: List of tool names user wants available
             max_tokens: Max tokens to generate
+            auto_search: If True, automatically search when query seems search-related
+            search_count: Number of search results to fetch
             
         Yields:
             Token chunks from the LLM
         """
-        # Start with system message
         formatted_history = []
         
-        # Add tool instructions at the beginning if tools are enabled
+        # Step 1: Check if we should perform a search
+        search_results = None
+        if auto_search and self._should_search(user_message):
+            try:
+                search_query = self._extract_search_query(user_message)
+                search_results = await self.search_tool.search(search_query, count=search_count)
+            except Exception as e:
+                print(f"Search failed: {e}")
+                # Continue without search results
+        
+        # Step 2: Build system instructions with tool specs
         if requested_tools:
             tool_instructions = self._get_tool_instructions(requested_tools)
             formatted_history.append({
@@ -213,15 +258,40 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 "content": tool_instructions
             })
         
-        # Add current user message
+        # Step 3: Add search results to context if available
+        if search_results and search_results.get("results"):
+            search_context = self._format_search_context(search_results)
+            formatted_history.append({
+                "role": "system",
+                "content": search_context
+            })
+        
+        # Step 4: Add user message
         formatted_history.append({
             "role": "user",
             "content": user_message
         })
 
-        # Stream from LLM
+        # Step 5: Stream from LLM with enriched context
         async for token in self.stream_async(formatted_history, max_tokens):
             yield token
+
+    def _format_search_context(self, search_results: Dict[str, Any]) -> str:
+        """Format search results into a context string for the LLM"""
+        context = f"# Web Search Results for: {search_results['query']}\n\n"
+        context += f"Found {search_results['total']} results:\n\n"
+        
+        for idx, result in enumerate(search_results['results'], 1):
+            context += f"## Result {idx}\n"
+            context += f"**Title:** {result['title']}\n"
+            context += f"**URL:** {result['url']}\n"
+            context += f"**Description:** {result['description']}\n"
+            if result.get('age'):
+                context += f"**Age:** {result['age']}\n"
+            context += "\n"
+        
+        context += "\nPlease use these search results to provide an accurate, up-to-date answer to the user's question. Cite sources when relevant.\n"
+        return context
 
     def _get_tool_instructions(self, tools: List[str]) -> str:
         """Generate system instructions for available tools"""
@@ -270,29 +340,43 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         chat_history: List[Dict[str, Any]],
         requested_tools: Optional[List[str]] = None,
         max_tokens: int = 4000,
-        max_tool_iterations: int = 5
+        max_tool_iterations: int = 5,
+        auto_search: bool = True
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream response and automatically execute tools if requested by LLM.
         
-        This is a more advanced version that can handle tool calls.
-        For now, it just streams normally - tool execution can be added later.
+        This streams tokens and can signal when search was performed.
         
         Yields:
             Dicts with:
                 - {"type": "token", "content": str} for text tokens
-                - {"type": "tool_call", "tool": str, "parameters": dict} for tool calls
-                - {"type": "tool_result", "result": dict} for tool results
+                - {"type": "search_performed", "query": str, "results": dict} when search happens
         """
-        response_text = ""
+        # Check if search should be performed
+        search_results = None
+        if auto_search and self._should_search(user_message):
+            try:
+                search_query = self._extract_search_query(user_message)
+                search_results = await self.search_tool.search(search_query, count=5)
+                
+                # Yield search notification
+                yield {
+                    "type": "search_performed",
+                    "query": search_query,
+                    "results": search_results
+                }
+            except Exception as e:
+                print(f"Search failed: {e}")
         
+        # Stream response with search results in context
         async for token in self.stream_async_with_context(
             user_message,
             chat_history,
             requested_tools,
-            max_tokens
+            max_tokens,
+            auto_search=False  # Already searched above
         ):
-            response_text += token
             yield {
                 "type": "token",
                 "content": token
