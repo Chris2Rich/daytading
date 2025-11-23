@@ -341,7 +341,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         if auto_search and self._should_search(user_message):
             try:
                 search_query = self._extract_search_query(user_message)
-                search_results = await self.search_tool.search(search_query, count=5)
+                search_results = await self.search_tool.search(search_query, max_results=8)
                 
                 # Yield search notification
                 yield {

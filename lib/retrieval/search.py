@@ -47,7 +47,7 @@ class SearchTool:
     # -------------------------------------------------------------  
     # UNIVERSAL SEARCH  
     # -------------------------------------------------------------  
-    async def search(self, query: str, endpoint: str = "web", start_date: str = None, end_date: str = None, max_results: int = 10) -> Dict[str, Any]:  
+    async def search(self, query: str, endpoint: str = "web", start_date: str = None, end_date: str = None, max_results: int = 8) -> Dict[str, Any]:  
         """Search Tavily with optional date filtering."""  
 
         payload = {  
