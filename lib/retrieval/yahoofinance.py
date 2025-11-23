@@ -36,6 +36,33 @@ def get_trading(ticker: str, days: int, interval: str):
     max_days = max_days_for_interval.get(interval, days)
     actual_days = min(days, max_days)
     
+    # For intraday data (1 day), fetch extra days to ensure we get the last trading day
+    # This handles weekends and holidays
+    if days == 1 and interval in ("1m", "5m", "15m", "30m", "1h"):
+        # Fetch up to 5 days to cover weekends + potential holidays
+        fetch_days = 5
+        start_date = end_date - timedelta(days=fetch_days)
+        
+        data = yf.download(
+            ticker,
+            start=start_date,
+            end=end_date,
+            interval=interval,
+            auto_adjust=True,
+            progress=False
+        )
+        
+        if data.empty:
+            return data
+        
+        # Get the last trading day in the data
+        last_trading_day = data.index[-1].date()
+        
+        # Filter to only include data from the last trading day
+        data = data[data.index.date == last_trading_day]
+        
+        return data
+    
     start_date = end_date - timedelta(days=actual_days)
     
     data = yf.download(
@@ -48,7 +75,7 @@ def get_trading(ticker: str, days: int, interval: str):
     )
     
     return data
-    
+   
 def get_option(ticker: str, expiry: str, direction: str, strike: float):
     optionstring = ticker + expiry + direction + f"{int(strike * 1000):08d}"
     asset = yf.Ticker(optionstring)
