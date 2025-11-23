@@ -6,6 +6,7 @@ import asyncio
 import aiohttp
 from typing import AsyncGenerator, List, Optional, Dict, Any
 import re
+import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
