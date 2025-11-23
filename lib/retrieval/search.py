@@ -98,7 +98,7 @@ class SearchTool:
             end = pair.get("end_date")  
             try:  
                 r = await self.search(q, ep, start_date=start, end_date=end)    
-                return q, ep, r  
+                return q, ep, str(r)  
             except:  
                 return q, ep, "Search error or no results."  
 
