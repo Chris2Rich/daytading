@@ -179,15 +179,29 @@ async def handle_generate(request):
             f"data: {json.dumps({'type': 'metadata', 'chatid': chat_id, 'message_id': user_message_id})}\n\n".encode()
         )
         
-        # Stream LLM response
+        # Stream LLM response with search support
         assistant_response = ""
         try:
             async for token_data in lm.stream_with_tools_execution(
                 user_message=message,
                 chat_history=chat_history[:-1],  # Exclude the message we just added
-                requested_tools=tools
+                requested_tools=tools,
+                auto_search=True  # Enable automatic web search
             ):
-                if token_data["type"] == "token":
+                if token_data["type"] == "search_performed":
+                    # Forward search event to frontend
+                    search_event = {
+                        "type": "search_performed",
+                        "query": token_data.get("query", ""),
+                        "result_count": token_data.get("results", {}).get("total", 0) if token_data.get("results") else 0
+                    }
+                    await response.write(
+                        f"data: {json.dumps(search_event)}\n\n".encode()
+                    )
+                    # Small delay to ensure frontend processes search event before tokens
+                    await asyncio.sleep(0.1)
+                    
+                elif token_data["type"] == "token":
                     token = token_data["content"]
                     assistant_response += token
                     
@@ -195,8 +209,9 @@ async def handle_generate(request):
                     await response.write(
                         f"data: {json.dumps({'type': 'token', 'content': token})}\n\n".encode()
                     )
+                    
                 elif token_data["type"] == "tool_call":
-                    # Future: Handle tool calls
+                    # Future: Handle other tool calls
                     await response.write(
                         f"data: {json.dumps(token_data)}\n\n".encode()
                     )
@@ -209,6 +224,7 @@ async def handle_generate(request):
                 content=assistant_response
             )
 
+            # Generate title for new chats
             if is_new_chat:
                 asyncio.create_task(generate_and_update_title(chat_id, message))
             
@@ -245,6 +261,7 @@ async def handle_generate(request):
             status=500
         )
 
+
 async def generate_and_update_title(chat_id: str, first_message: str):
     """Background task to generate and update chat title"""
     try:
@@ -252,6 +269,7 @@ async def generate_and_update_title(chat_id: str, first_message: str):
         await db.update_chat_title(chat_id, title)
     except Exception as e:
         print(f"Error generating title: {e}")
+
 
 @require_auth
 async def handle_get_history(request):
@@ -306,6 +324,7 @@ async def handle_get_history(request):
             status=500
         )
 
+
 @require_auth
 async def handle_get_chats(request):
     """
@@ -339,6 +358,7 @@ async def handle_get_chats(request):
             {"error": "Internal server error"},
             status=500
         )
+
 
 @require_auth
 async def handle_delete_chat(request):
@@ -378,6 +398,7 @@ async def handle_delete_chat(request):
             {"error": "Internal server error"},
             status=500
         )
+
 
 @require_auth
 async def handle_ticker_data(request):
@@ -589,6 +610,7 @@ async def handle_ticker_data(request):
             status=500
         )
 
+
 async def handle_health(request):
     """Health check endpoint"""
     return web.json_response({"status": "ok"})
@@ -604,6 +626,7 @@ async def on_cleanup(app):
     """Cleanup on shutdown"""
     await db.close()
     print("Database connection closed")
+
 
 @web.middleware
 async def cors_middleware(request, handler):
@@ -628,6 +651,7 @@ async def cors_middleware(request, handler):
     response.headers["Access-Control-Allow-Credentials"] = "true"
     
     return response
+
 
 def create_app():
     """Create and configure the aiohttp application"""
