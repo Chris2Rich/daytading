@@ -9,62 +9,27 @@ os.environ['YFINANCE_QUIET'] = '1'
 
 def get_trading(ticker: str, days: int, interval: str):
     """
-    Fetch trading data for a ticker.
-    
-    Args:
-        ticker: Stock symbol
-        days: Number of days of data to fetch
-        interval: Data interval - 1m, 5m, 15m, 30m, 1h, 1d, 1wk, 1mo
-    
-    Returns:
-        DataFrame with OHLCV data
+    Fetch trading data for a ticker and convert values to USD.
     """
     end_date = datetime.now(tz=timezone.utc)
     
-    # Yahoo Finance has limits on intraday data availability
+    # Yahoo Finance limits logic (kept same as your snippet)
     max_days_for_interval = {
-        "1m": 7,
-        "5m": 60,
-        "15m": 60,
-        "30m": 60,
-        "1h": 730,
-        "1d": 10000,
-        "1wk": 10000,
-        "1mo": 10000,
+        "1m": 7, "5m": 60, "15m": 60, "30m": 60, "1h": 730,
+        "1d": 10000, "1wk": 10000, "1mo": 10000,
     }
     
     max_days = max_days_for_interval.get(interval, days)
     actual_days = min(days, max_days)
     
-    # For intraday data (1 day), fetch extra days to ensure we get the last trading day
-    # This handles weekends and holidays
-    if days == 1 and interval in ("1m", "5m", "15m", "30m", "1h"):
-        # Fetch up to 5 days to cover weekends + potential holidays
-        fetch_days = 5
-        start_date = end_date - timedelta(days=fetch_days)
-        
-        data = yf.download(
-            ticker,
-            start=start_date,
-            end=end_date,
-            interval=interval,
-            auto_adjust=True,
-            progress=False
-        )
-        
-        if data.empty:
-            return data
-        
-        # Get the last trading day in the data
-        last_trading_day = data.index[-1].date()
-        
-        # Filter to only include data from the last trading day
-        data = data[data.index.date == last_trading_day]
-        
-        return data
-    
     start_date = end_date - timedelta(days=actual_days)
     
+    # 1. Special handling for intraday single day (kept your logic)
+    if days == 1 and interval in ("1m", "5m", "15m", "30m", "1h"):
+        fetch_days = 5
+        start_date = end_date - timedelta(days=fetch_days)
+    
+    # 2. Fetch the Stock Data
     data = yf.download(
         ticker,
         start=start_date,
@@ -74,8 +39,74 @@ def get_trading(ticker: str, days: int, interval: str):
         progress=False
     )
     
+    if data.empty:
+        return data
+
+    # Filter for last trading day if specific 1-day logic was used
+    if days == 1 and interval in ("1m", "5m", "15m", "30m", "1h"):
+        last_trading_day = data.index[-1].date()
+        data = data[data.index.date == last_trading_day]
+
+    # --- START USD CONVERSION LOGIC ---
+    try:
+        # 3. Get Ticker Currency
+        # fast_info is faster and more reliable than .info for this property
+        ticker_obj = yf.Ticker(ticker)
+        currency = ticker_obj.fast_info.get('currency', 'USD')
+        
+        if currency != 'USD':
+            # Construct FX Ticker (e.g., EUR -> EURUSD=X)
+            fx_ticker = f"{currency}USD=X"
+            
+            # Fetch FX data for the exact same timeframe
+            # We use the data's own index boundaries to be precise
+            fx_start = data.index[0]
+            fx_end = data.index[-1] + timedelta(days=1) # Buffer for end date
+
+            fx_data = yf.download(
+                fx_ticker,
+                start=fx_start,
+                end=fx_end,
+                interval=interval,
+                auto_adjust=True,
+                progress=False
+            )
+
+            if not fx_data.empty:
+                # 4. Align Data
+                # FX data might have slightly different timestamps or timezones.
+                # We reindex the FX data to match the Stock data's index exactly,
+                # using forward fill (ffill) to use the last known exchange rate.
+                
+                # Ensure timezones match if one is tz-aware and the other isn't
+                if data.index.tz is not None and fx_data.index.tz is None:
+                    fx_data.index = fx_data.index.tz_localize(data.index.tz)
+                elif data.index.tz is None and fx_data.index.tz is not None:
+                     fx_data.index = fx_data.index.tz_convert(None)
+                elif data.index.tz != fx_data.index.tz:
+                     fx_data.index = fx_data.index.tz_convert(data.index.tz)
+
+                # Map FX Close price to Stock index
+                exchange_rates = fx_data['Close'].reindex(data.index, method='ffill')
+                
+                # Fill any remaining NaNs (start of period) with the first available rate
+                exchange_rates = exchange_rates.bfill()
+
+                # 5. Apply Conversion
+                cols_to_convert = ['Open', 'High', 'Low', 'Close']
+                for col in cols_to_convert:
+                    if col in data.columns:
+                        data[col] = data[col] * exchange_rates
+
+    except Exception as e:
+        print(f"Warning: USD conversion failed for {ticker}: {e}")
+        # Return original data if conversion fails
+        pass
+    
+    # --- END USD CONVERSION LOGIC ---
+
     return data
-   
+
 def get_option(ticker: str, expiry: str, direction: str, strike: float):
     optionstring = ticker + expiry + direction + f"{int(strike * 1000):08d}"
     asset = yf.Ticker(optionstring)
