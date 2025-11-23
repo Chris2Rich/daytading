@@ -1,166 +1,220 @@
 import os
 import aiohttp
+import asyncio
 from typing import Dict, Any, List, Optional
 import json
 import re
 from urllib.parse import urlencode
 
-class SearchTool:
-    """Web search tool using Brave Search API + multi-search support"""
 
-    def __init__(self, lm=None, api_key: Optional[str] = None):
-        """
-        Args:
-            lm: Your LM wrapper so we can use stream_async to generate queries
-            api_key: Brave API key
-        """
+class SearchTool:
+    """Web + News search tool using Brave Search API with multi-search support"""
+
+    def __init__(self, lm=None, api_key: Optional[str] = None, concurrency: int = 3):
         self.lm = lm
         self.api_key = api_key or os.environ.get("BRAVE_TOKEN")
-        self.base_url = "https://api.search.brave.com/res/v1/web/search"
-    
-    # ----------------------------------------------------------------------
-    # ORIGINAL SINGLE SEARCH
-    # ----------------------------------------------------------------------
-    async def search(self, query: str, count: int = 5) -> Dict[str, Any]:
-        """Perform simple web search using Brave Search API"""
+        self.base_web = "https://api.search.brave.com/res/v1/web/search"
+        self.base_news = "https://api.search.brave.com/res/v1/news/search"
 
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.sem = asyncio.Semaphore(concurrency)
+
+    # -------------------------------------------------------------
+    # SESSION HANDLING
+    # -------------------------------------------------------------
+    async def _get_session(self):
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            )
+        return self.session
+
+    # -------------------------------------------------------------
+    # LOW-LEVEL REQUEST
+    # -------------------------------------------------------------
+    async def _request(self, url: str) -> Dict[str, Any]:
+        """Perform a GET request to Brave."""
         if not self.api_key:
-            raise ValueError("Brave Search API key not found in BRAVE_TOKEN environment variable")
-        
-        headers = {
-            "Accept": "application/json",
-            "X-Subscription-Token": self.api_key
-        }
+            raise ValueError("Missing BRAVE_TOKEN")
+
+        sess = await self._get_session()
+
+        async with self.sem:
+            async with sess.get(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "X-Subscription-Token": self.api_key,
+                }
+            ) as resp:
+                if resp.status != 200:
+                    txt = await resp.text()
+                    raise Exception(f"Brave API error {resp.status}: {txt}")
+                return await resp.json()
+
+    # -------------------------------------------------------------
+    # UNIVERSAL SEARCH WRAPPER (web or news)
+    # -------------------------------------------------------------
+    async def search(self, query: str, endpoint: str = "web", count: int = 8) -> Dict[str, Any]:
+        """Search either web or news with recency boost."""
+
+        if endpoint == "news":
+            base = self.base_news
+        else:
+            base = self.base_web
 
         params = {
             "q": query,
             "count": min(count, 20),
-            "search_lang": "en"
+            "search_lang": "en",
         }
-        
-        query_string = urlencode(params)
-        full_url = f"{self.base_url}?{query_string}"
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    full_url,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as response:
-                    if response.status != 200:
-                        err = await response.text()
-                        raise Exception(f"Brave Search failed ({response.status}): {err}")
-                    
-                    data = await response.json()
-                    return self._format_results(data)
-        
-        except Exception as e:
-            raise Exception(f"Search error: {e}")
 
-    def _format_results(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Format Brave search results into a clean structure"""
+        url = f"{base}?{urlencode(params)}"
+        raw = await self._request(url)
+        return self._format_results(raw, endpoint)
+
+    # -------------------------------------------------------------
+    # FORMAT RESULTS
+    # -------------------------------------------------------------
+    def _format_results(self, data: Dict[str, Any], endpoint: str) -> Dict[str, Any]:
+        """Normalize Brave web/news results."""
         results = []
-        
-        if "web" in data and "results" in data["web"]:
-            for item in data["web"]["results"]:
-                results.append({
-                    "title": item.get("title") or "",
-                    "url": item.get("url") or "",
-                    "description": item.get("description") or "",
-                    "age": item.get("age") or ""
-                })
-        
+
+        key = "news" if endpoint == "news" else "web"
+        bucket = data.get(key, {}).get("results", [])
+
+        for item in bucket:
+            results.append({
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "description": item.get("description", ""),
+                "age": item.get("age", ""),
+                "source": endpoint
+            })
+
         return {
-            "query": data.get("query", {}).get("original", ""),
             "results": results,
             "total": len(results)
         }
 
-    # ----------------------------------------------------------------------
-    # MULTI SEARCH EXTENSION
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------
+    # MULTI SEARCH
+    # -------------------------------------------------------------
     async def multi_search(self, user_message: str) -> str:
-        """
-        High-level multi-search:
-        1. Generate multiple queries
-        2. Run all searches in parallel
-        3. Build a merged context block to feed the LLM
-        """
+        """Full multi-search pipeline with summarization."""
 
-        # Step 1: Ask the model for multiple search queries
-        queries = await self.generate_queries(user_message)
+        pairs = await self.generate_queries(user_message)
 
-        # Step 2: Run all queries concurrently
-        async def run(q):
+        async def run(pair):
+            q = pair["q"]
+            ep = pair["endpoint"]
             try:
-                return q, await self.search(q, count=5)
+                r = await self.search(q, ep)
+                summary = await self.summarize_results(q, r["results"])
+                return q, ep, summary
             except:
-                return q, None
+                return q, ep, "Search error or no results."
 
-        results = await asyncio.gather(*[run(q) for q in queries])
+        results = await asyncio.gather(*[run(p) for p in pairs])
+        return self.build_context(results)
 
-        # Step 3: Build a merged context block
-        ctx = self.build_context(results)
-
-        return ctx
-
-    # ----------------------------------------------------------------------
-    # MULTI SEARCH HELPERS
-    # ----------------------------------------------------------------------
-    async def generate_queries(self, user_message: str, max_queries: int = 5) -> List[str]:
+    # -------------------------------------------------------------
+    # QUERY GENERATION
+    # -------------------------------------------------------------
+    async def generate_queries(self, user_message: str) -> List[Dict[str, str]]:
         """
-        Use the LLM to propose 3–6 relevant search queries.
+        Model returns JSON list of:
+        [
+            {"q": "...", "endpoint": "news"},
+            {"q": "...", "endpoint": "web"}
+        ]
         """
 
         if self.lm is None:
-            # fallback to single query mode
-            return [user_message]
+            return [{"q": user_message, "endpoint": "web"}]
 
         prompt = [
             {
                 "role": "system",
                 "content": (
-                    "Generate 3–6 highly relevant, diverse search queries "
-                    "that would help answer the user's question.\n"
-                    "Return ONLY a JSON list of strings. No commentary."
+                    "Generate 3–6 search tasks as JSON.\n"
+                    "Each item must be an object: {\"q\": string, \"endpoint\": \"web\" | \"news\"}.\n"
+                    "Choose endpoint = 'news' when the question involves recent events, finance, geopolitics, or anything time-sensitive.\n"
+                    "Return ONLY the JSON array. No commentary."
                 )
             },
             {"role": "user", "content": user_message}
         ]
 
         buffer = ""
-        async for tok in self.lm.stream_async(prompt, max_tokens=200):
-            buffer += tok
+        async for t in self.lm.stream_async(prompt, max_tokens=200):
+            buffer += t
 
-        # Extract the JSON list
+        # Extract JSON safely
         try:
-            json_text = re.search(r"\[.*\]", buffer, re.S).group(0)
-            queries = json.loads(json_text)
-            return [q.strip() for q in queries if isinstance(q, str)]
+            jtxt = re.search(r"\[.*\]", buffer, re.S).group(0)
+            arr = json.loads(jtxt)
+            clean = []
+            for item in arr:
+                if not isinstance(item, dict):
+                    continue
+                q = item.get("q")
+                ep = (item.get("endpoint") or "web").lower()
+                if q and ep in ("web", "news"):
+                    clean.append({"q": q.strip(), "endpoint": ep})
+            return clean or [{"q": user_message, "endpoint": "web"}]
         except:
-            return [user_message]
+            return [{"q": user_message, "endpoint": "web"}]
 
-    def build_context(self, results: List[Any]) -> str:
-        """
-        Convert multiple search results into one large context block.
-        """
+    # -------------------------------------------------------------
+    # SUMMARIZATION OF SEARCH RESULTS
+    # -------------------------------------------------------------
+    async def summarize_results(self, original_query: str, items: List[Dict[str, Any]]) -> str:
+        """Compress search results to a small, relevant summary."""
 
-        ctx = "# Multi-Search Results\n\n"
+        if not items:
+            return "No results."
 
-        for q, r in results:
-            ctx += f"## Query: {q}\n"
-            if not r or not r.get("results"):
-                ctx += "No results.\n\n"
-                continue
+        text = "\n".join(
+            f"Title: {i['title']}\nDesc: {i['description']}\nURL: {i['url']}"
+            for i in items
+        )
 
-            for item in r["results"]:
-                ctx += (
-                    f"- **{item['title']}**\n"
-                    f"  {item['description']}\n"
-                    f"  {item['url']}\n"
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "Summarize the following search results into 3–7 bullet points.\n"
+                    "Focus on relevance to the original query.\n"
+                    "Be concise but preserve factual accuracy."
                 )
-            ctx += "\n"
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"ORIGINAL QUERY:\n{original_query}\n\n"
+                    f"SEARCH RESULTS:\n{text}"
+                )
+            }
+        ]
 
-        ctx += "\nUse this context to answer the user's question accurately.\n"
+        summary = ""
+        async for t in self.lm.stream_async(prompt, max_tokens=250):
+            summary += t
+
+        return summary.strip()
+
+    # -------------------------------------------------------------
+    # MERGED CONTEXT
+    # -------------------------------------------------------------
+    def build_context(self, results: List[Any]) -> str:
+        """Inject summarized results into a clean context block."""
+
+        ctx = "# Multi-Search Context\n\n"
+
+        for q, ep, summary in results:
+            ctx += f"## Query: {q}  (endpoint={ep})\n"
+            ctx += summary + "\n\n"
+
+        ctx += "Use this context to answer the user's question accurately.\n"
         return ctx
