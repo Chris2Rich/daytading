@@ -97,9 +97,8 @@ class SearchTool:
             start = pair.get("start_date")  
             end = pair.get("end_date")  
             try:  
-                r = await self.search(q, ep, start_date=start, end_date=end)  
-                summary = await self.summarize_results(q, r["results"])  
-                return q, ep, summary  
+                r = await self.search(q, ep, start_date=start, end_date=end)    
+                return q, ep, r  
             except:  
                 return q, ep, "Search error or no results."  
 
@@ -145,26 +144,6 @@ class SearchTool:
             return clean or [{"q": user_message, "endpoint": "web"}]  
         except:  
             return [{"q": user_message, "endpoint": "web"}]  
-
-    # -------------------------------------------------------------  
-    # SUMMARIZE RESULTS  
-    # -------------------------------------------------------------  
-    async def summarize_results(self, original_query: str, items: List[Dict[str, Any]]) -> str:  
-        if not items:  
-            return "No results."  
-
-        text = "\n".join(f"Title: {i['title']}\nDesc: {i['description']}\nURL: {i['url']}" for i in items)  
-
-        prompt = [  
-            {"role": "system", "content": "Summarize search results concisely, relevant to the original query."},  
-            {"role": "user", "content": f"ORIGINAL QUERY:\n{original_query}\n\nSEARCH RESULTS:\n{text}"}  
-        ]  
-
-        summary = ""  
-        async for t in self.lm.stream_async(prompt, max_tokens=1000):  
-            summary += t  
-
-        return summary.strip()  
 
     # -------------------------------------------------------------  
     # BUILD CONTEXT  
