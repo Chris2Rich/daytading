@@ -181,7 +181,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.search_tool = SearchTool()
+        self.search_tool = SearchTool(self)
 
     def _should_search(self, user_message: str) -> bool:
         """
@@ -246,7 +246,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         if auto_search and self._should_search(user_message):
             try:
                 search_query = self._extract_search_query(user_message)
-                search_results = await self.search_tool.search(search_query, count=search_count)
+                search_results = await self.search_tool.multi_search(search_query)
             except Exception as e:
                 print(f"Search failed: {e}")
                 # Continue without search results
