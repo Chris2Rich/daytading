@@ -699,6 +699,7 @@ async def main():
     print("  GET  /lm/gethistory?chatid=<id>")
     print("  GET  /lm/chats")
     print("  GET  /lm/deletechat?chatid=<id>")
+    print("  GET  /data/tickerdata")
     print("  GET  /health")
     
     # Keep server running
