@@ -202,7 +202,6 @@ class SearchTool:
         async for t in self.lm.stream_async(prompt, max_tokens=1000):
             summary += t
 
-        print(summary)
         return summary.strip()
 
     # -------------------------------------------------------------

@@ -190,9 +190,8 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         Uses simple heuristics to detect search intent.
         """
         search_indicators = [
-            'search', 'find', 'look up', 'what is', "what's", 
-            'who is', 'when did', 'latest', 'recent', 'news',
-            'current', 'today', 'price', 'stock', 'weather'
+            'search', 'find', 'look up', 'latest', 'recent', 'news',
+            'current', 'today', 'price', 'stock', "what", "where", "who", "why", "how", "?"
         ]
         
         message_lower = user_message.lower()
