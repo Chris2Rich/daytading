@@ -137,7 +137,7 @@ class SearchTool:
             {
                 "role": "system",
                 "content": (
-                    "Generate 3–6 search tasks as JSON.\n"
+                    "Generate 3-6 search tasks as JSON.\n"
                     "Each item must be an object: {\"q\": string, \"endpoint\": \"web\" | \"news\"}.\n"
                     "Choose endpoint = 'news' when the question involves recent events, finance, geopolitics, or anything time-sensitive.\n"
                     "Return ONLY the JSON array. No commentary."
@@ -147,7 +147,7 @@ class SearchTool:
         ]
 
         buffer = ""
-        async for t in self.lm.stream_async(prompt, max_tokens=200):
+        async for t in self.lm.stream_async(prompt, max_tokens=1000):
             buffer += t
 
         # Extract JSON safely
@@ -184,9 +184,9 @@ class SearchTool:
             {
                 "role": "system",
                 "content": (
-                    "Summarize the following search results into 3–7 bullet points.\n"
+                    "Summarize the following search results.\n"
                     "Focus on relevance to the original query.\n"
-                    "Be concise but preserve factual accuracy."
+                    "Be concise but preserve factual accuracy above all else."
                 )
             },
             {
@@ -199,9 +199,10 @@ class SearchTool:
         ]
 
         summary = ""
-        async for t in self.lm.stream_async(prompt, max_tokens=250):
+        async for t in self.lm.stream_async(prompt, max_tokens=1000):
             summary += t
 
+        print(summary)
         return summary.strip()
 
     # -------------------------------------------------------------
