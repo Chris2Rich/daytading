@@ -9,38 +9,40 @@ os.environ['YFINANCE_QUIET'] = '1'
 
 def get_trading(ticker: str, days: int, interval: str):
     """
-    Fetch trading data for a ticker and convert values to USD.
+    Fetch trading data for a ticker.
+    
+    Args:
+        ticker: Stock symbol
+        days: Number of days of data to fetch
+        interval: Data interval - 1m, 5m, 15m, 30m, 1h, 1d, 1wk, 1mo
+    
+    Returns:
+        DataFrame with OHLCV data
     """
     end_date = datetime.now(tz=timezone.utc)
     
+    # Yahoo Finance has limits on intraday data availability
     max_days_for_interval = {
-        "1m": 7, "5m": 60, "15m": 60, "30m": 60, "1h": 730,
-        "1d": 10000, "1wk": 10000, "1mo": 10000,
+        "1m": 7,
+        "5m": 60,
+        "15m": 60,
+        "30m": 60,
+        "1h": 730,
+        "1d": 10000,
+        "1wk": 10000,
+        "1mo": 10000,
     }
     
     max_days = max_days_for_interval.get(interval, days)
     actual_days = min(days, max_days)
     
-    start_date = end_date - timedelta(days=actual_days)
-    
-    # 1. Handle intraday buffer logic
+    # For intraday data (1 day), fetch extra days to ensure we get the last trading day
+    # This handles weekends and holidays
     if days == 1 and interval in ("1m", "5m", "15m", "30m", "1h"):
+        # Fetch up to 5 days to cover weekends + potential holidays
         fetch_days = 5
         start_date = end_date - timedelta(days=fetch_days)
-    
-    # 2. Fetch the Stock Data
-    try:
-        data = yf.download(
-            ticker,
-            start=start_date,
-            end=end_date,
-            interval=interval,
-            auto_adjust=True,
-            progress=False,
-            multi_level_index=False  # Try to force single level if supported
-        )
-    except TypeError:
-        # Fallback for older yfinance versions that don't support multi_level_index arg
+        
         data = yf.download(
             ticker,
             start=start_date,
@@ -49,87 +51,31 @@ def get_trading(ticker: str, days: int, interval: str):
             auto_adjust=True,
             progress=False
         )
-    
-    if data.empty:
-        return data
-
-    # FIX: Flatten MultiIndex columns if present (e.g., ('Close', 'BMW.DE') -> 'Close')
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-
-    # Filter for last trading day if specific 1-day logic was used
-    if days == 1 and interval in ("1m", "5m", "15m", "30m", "1h"):
-        last_trading_day = data.index[-1].date()
-        data = data[data.index.date == last_trading_day]
-
-    # --- START USD CONVERSION LOGIC ---
-    try:
-        # 3. Get Ticker Currency
-        ticker_obj = yf.Ticker(ticker)
-        # fast_info is reliable for currency
-        currency = ticker_obj.fast_info.get('currency', 'USD')
         
-        if currency != 'USD':
-            fx_ticker = f"{currency}USD=X"
-            
-            # Fetch FX data for exact timeframe
-            fx_start = data.index[0]
-            fx_end = data.index[-1] + timedelta(days=1)
-
-            try:
-                fx_data = yf.download(
-                    fx_ticker,
-                    start=fx_start,
-                    end=fx_end,
-                    interval=interval,
-                    auto_adjust=True,
-                    progress=False,
-                    multi_level_index=False
-                )
-            except TypeError:
-                fx_data = yf.download(
-                    fx_ticker,
-                    start=fx_start,
-                    end=fx_end,
-                    interval=interval,
-                    auto_adjust=True,
-                    progress=False
-                )
-
-            if not fx_data.empty:
-                # FIX: Flatten FX columns too
-                if isinstance(fx_data.columns, pd.MultiIndex):
-                    fx_data.columns = fx_data.columns.get_level_values(0)
-
-                # 4. Align Data & Normalize Timezones
-                # Handle timezone mismatches (common between stock exchange & forex data)
-                if data.index.tz is not None and fx_data.index.tz is None:
-                    fx_data.index = fx_data.index.tz_localize(data.index.tz)
-                elif data.index.tz is None and fx_data.index.tz is not None:
-                     fx_data.index = fx_data.index.tz_convert(None)
-                elif data.index.tz != fx_data.index.tz:
-                     fx_data.index = fx_data.index.tz_convert(data.index.tz)
-
-                # Map FX Close price to Stock index using Forward Fill
-                # This creates a Series with exactly the same index as 'data'
-                exchange_rates = fx_data['Close'].reindex(data.index, method='ffill')
-                
-                # Fill any start-of-period gaps
-                exchange_rates = exchange_rates.bfill()
-
-                # 5. Apply Conversion
-                cols_to_convert = ['Open', 'High', 'Low', 'Close']
-                for col in cols_to_convert:
-                    if col in data.columns:
-                        # Direct multiplication is now safe because both are single-level Index/Series
-                        data[col] = data[col] * exchange_rates
-
-    except Exception as e:
-        print(f"Warning: USD conversion failed for {ticker}: {e}")
-        pass
+        if data.empty:
+            return data
+        
+        # Get the last trading day in the data
+        last_trading_day = data.index[-1].date()
+        
+        # Filter to only include data from the last trading day
+        data = data[data.index.date == last_trading_day]
+        
+        return data
+    
+    start_date = end_date - timedelta(days=actual_days)
+    
+    data = yf.download(
+        ticker,
+        start=start_date,
+        end=end_date,
+        interval=interval,
+        auto_adjust=True,
+        progress=False
+    )
     
     return data
-    
+   
 def get_option(ticker: str, expiry: str, direction: str, strike: float):
     optionstring = ticker + expiry + direction + f"{int(strike * 1000):08d}"
     asset = yf.Ticker(optionstring)
