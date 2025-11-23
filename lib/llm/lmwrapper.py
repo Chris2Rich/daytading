@@ -246,6 +246,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             try:
                 search_query = self._extract_search_query(user_message)
                 search_results = await self.search_tool.multi_search(search_query)
+                print(search_results)
             except Exception as e:
                 print(f"Search failed: {e}")
                 # Continue without search results
