@@ -260,11 +260,10 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             })
         
         # Step 3: Add search results to context if available
-        if search_results and search_results.get("results"):
-            search_context = self._format_search_context(search_results)
+        if search_results:
             formatted_history.append({
                 "role": "system",
-                "content": search_context
+                "content": search_results
             })
         
         # Step 4: Add user message
@@ -276,23 +275,6 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         # Step 5: Stream from LLM with enriched context
         async for token in self.stream_async(formatted_history, max_tokens):
             yield token
-
-    def _format_search_context(self, search_results: Dict[str, Any]) -> str:
-        """Format search results into a context string for the LLM"""
-        context = f"# Web Search Results for: {search_results['query']}\n\n"
-        context += f"Found {search_results['total']} results:\n\n"
-        
-        for idx, result in enumerate(search_results['results'], 1):
-            context += f"## Result {idx}\n"
-            context += f"**Title:** {result['title']}\n"
-            context += f"**URL:** {result['url']}\n"
-            context += f"**Description:** {result['description']}\n"
-            if result.get('age'):
-                context += f"**Age:** {result['age']}\n"
-            context += "\n"
-        
-        context += "\nPlease use these search results to provide an accurate, up-to-date answer to the user's question. Cite sources when relevant.\n"
-        return context
 
     def _get_tool_instructions(self, tools: List[str]) -> str:
         """Generate system instructions for available tools"""
