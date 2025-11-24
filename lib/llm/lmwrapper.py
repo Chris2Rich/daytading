@@ -52,7 +52,7 @@ class LM_WRAPPER:
             api_key=routers[provider]["api_key"],
             api_base=routers[provider]["base_url"],
             temperature=temperature,
-            max_tokens=4000,
+            max_tokens=8000,
             stop=None,
             cache=True,
             cache_in_memory=False,
@@ -80,7 +80,7 @@ class LM_WRAPPER:
         )
 
     async def stream_async(
-        self, messages: list, max_tokens: int = 4000
+        self, messages: list, max_tokens: int = 8000
     ) -> AsyncGenerator[str, None]:
         """
         Asynchronous token streaming from the provider.
@@ -189,35 +189,26 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         chat_history: List[Dict[str, Any]],
         requested_tools: Optional[List[str]] = None,
         max_tokens: int = 4000,
+        temperature: Optional[float] = None,  # Add this
         auto_search: bool = True,
-        search_count: int = 5
     ) -> AsyncGenerator[str, None]:
-        """
-        Stream response with full chat history context and automatic search.
+        """Stream response with improved context handling."""
+
+        if temperature is None:
+            # Lower temperature for factual/search queries
+            message_lower = user_message.lower()
+            if any(word in message_lower for word in ["what", "when", "who", "where", "why", "define", "explain", "how"]):
+                temperature = 0.1
+            else:
+                temperature = self.temperature
         
-        Args:
-            user_message: Current user message
-            chat_history: Full chat history from database
-            requested_tools: List of tool names user wants available
-            max_tokens: Max tokens to generate
-            auto_search: If True, automatically search when query seems search-related
-            search_count: Number of search results to fetch
-            
-        Yields:
-            Token chunks from the LLM
-        """
+        # Store original and temporarily override
+        original_temp = self.temperature
+        self.temperature = temperature
+        
         formatted_history = []
         
-        # Step 1: Check if we should perform a search
-        search_results = None
-        if "search" in requested_tools:
-            try:
-                search_results = await self.search_tool.multi_search(user_message)
-            except Exception as e:
-                print(f"Search failed: {e}")
-                # Continue without search results
-        
-        # Step 2: Build system instructions with tool specs
+        # Step 1: System instructions FIRST
         if requested_tools:
             tool_instructions = self._get_tool_instructions(requested_tools)
             formatted_history.append({
@@ -225,23 +216,44 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 "content": tool_instructions
             })
         
-        # Step 3: Add search results to context if available
-        if search_results:
+        # Step 2: Add chat history (critical for context!)
+        for msg in chat_history:
             formatted_history.append({
-                "role": "system",
-                "query": search_results[1],
-                "content": search_results[0]
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
             })
         
-        # Step 4: Add user message
+        # Step 3: Perform search if enabled
+        search_context = None
+        if "search" in (requested_tools or []):
+            try:
+                search_results, query = await self.search_tool.multi_search(user_message)
+                # Format search results MORE CLEARLY
+                search_context = f"""
+    SEARCH RESULTS for query: "{query}"
+
+    {search_results}
+
+    IMPORTANT: Base your response on these search results. Cite sources with [Source: URL].
+    """
+            except Exception as e:
+                print(f"Search failed: {e}")
+        
+        # Step 4: Build user message with search context
+        final_user_message = user_message
+        if search_context:
+            final_user_message = f"{search_context}\n\nUser Question: {user_message}"
+        
         formatted_history.append({
             "role": "user",
-            "content": user_message
+            "content": final_user_message
         })
 
-        # Step 5: Stream from LLM with enriched context
+        # Step 5: Stream response
         async for token in self.stream_async(formatted_history, max_tokens):
             yield token
+
+        self.temperature = original_temp
 
     def _get_tool_instructions(self, tools: List[str]) -> str:
         """Generate system instructions for available tools"""
@@ -261,20 +273,25 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             """,
         }
         
-        base_instructions = """
-        You are a helpful AI assistant. Your name is ZECA and you were developed by a company known as Zecant.
-        
-        GENERATION RULES:
-        You are incorrect unless you have evidence that can back up your facts, figures and hypotheses, do not rely on your own knowledge to make statements.
+        base_instructions = """You are ZECA, an advanced AI assistant developed by Zecant.
 
+        CORE PRINCIPLES:
+        - Accuracy First: Only make claims you can support with evidence from search results or reliable knowledge
+        - Cite Sources: When using search results, cite them as [Source: domain.com]
+        - Be Concise: Get to the point quickly, avoid unnecessary preamble
+        - Think Step-by-Step: For complex queries, break down your reasoning
+        - Admit Uncertainty: If you don't know, say so - don't fabricate information
 
-        IMPORTANT FORMATTING RULES:
-        - For mathematical expressions:
-        * Display math: Use $$...$$ or \\[...\\]
-        * Inline math: Use \\(...\\) ONLY
-        * DO NOT use single dollar signs $...$ for math
-        * Example inline: The angle \\(\\theta\\) is \\(90^\\circ\\)
-        * Example display: $$x^2 + y^2 = r^2$$
+        SEARCH RESULTS USAGE:
+        - When search results are provided, prioritize them over your training data
+        - Synthesize information from multiple sources when available
+        - If sources conflict, note the discrepancy
+        - Always attribute specific facts to their sources
+
+        MATH FORMATTING:
+        - Display math: $$...$$
+        - Inline math: \\(...\\) ONLY (never use $...$)
+        - Example: The equation \\(E = mc^2\\) shows that $$E = mc^2$$
 
         """
         
@@ -293,7 +310,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         user_message: str,
         chat_history: List[Dict[str, Any]],
         requested_tools: Optional[List[str]] = None,
-        max_tokens: int = 4000,
+        max_tokens: int = 8000,
         max_tool_iterations: int = 5,
         auto_search: bool = True
     ) -> AsyncGenerator[Dict[str, Any], None]:

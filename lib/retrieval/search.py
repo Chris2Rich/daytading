@@ -108,22 +108,48 @@ class SearchTool:
     # -------------------------------------------------------------  
     # QUERY GENERATION  
     # -------------------------------------------------------------  
-    async def generate_queries(self, user_message: str) -> List[Dict[str, Any]]:  
-        """Model returns JSON list of {q, endpoint, start_date?, end_date?}."""  
+    async def generate_queries(self, user_message: str) -> List[Dict[str, Any]]:
+        """Generate better search queries."""
+        
+        if self.lm is None:
+            return [{"q": user_message, "endpoint": "web"}]
+        
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        prompt = [
+            {"role": "system", "content": f"""Today is {today}. Analyze the user's question and generate 3-6 strategic search queries.
 
-        if self.lm is None:  
-            return [{"q": user_message, "endpoint": "web"}]  
+    QUERY GENERATION RULES:
+    1. Break complex questions into focused sub-queries
+    2. Use specific, searchable terms (avoid vague language)
+    3. Choose endpoint wisely:
+    - "news" for: current events, recent developments, breaking news, market updates
+    - "web" for: general information, historical facts, how-to guides, definitions
+    4. Add recency when relevant:
+    - days=1 for breaking news
+    - days=7 for recent events
+    - days=30 for monthly trends
+    - Omit for timeless topics
 
-        prompt = [  
-            {"role": "system", "content": (  
-                "Generate 3-6 search tasks as JSON array.\n"  
-                "Each item must be an object: {\"q\": string, \"endpoint\": \"web\" | \"news\", \"start_date\": \"YYYY-MM-DD\"?, \"end_date\": \"YYYY-MM-DD\"?}.\n"  
-                "Choose endpoint='news' for time-sensitive topics, finance, or recent events.\n"
-                "Think hard about what questions will give the best answers. \n"
-                "Return ONLY the JSON array. No commentary."  
-            )},  
-            {"role": "user", "content": user_message}  
-        ]  
+    OUTPUT FORMAT (JSON array only):
+    [
+    {{"q": "specific search query", "endpoint": "web" | "news", "days": number or omit}},
+    ...
+    ]
+
+    EXAMPLE:
+    User: "What caused the recent stock market volatility?"
+    Output:
+    [
+    {{"q": "stock market volatility causes", "endpoint": "news", "days": 7}},
+    {{"q": "S&P 500 recent performance", "endpoint": "news", "days": 7}},
+    {{"q": "Federal Reserve interest rate decision", "endpoint": "news", "days": 14}}
+    ]
+
+    Return ONLY the JSON array with no commentary."""},
+            {"role": "user", "content": user_message}
+        ]
 
         buffer = ""  
         async for t in self.lm.stream_async(prompt, max_tokens=1000):  
