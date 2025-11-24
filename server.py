@@ -193,7 +193,6 @@ async def handle_generate(request):
                     search_event = {
                         "type": "search_performed",
                         "query": token_data.get("query", ""),
-                        "result_count": token_data.get("results", {}).get("total", 0) if token_data.get("results") else 0
                     }
                     await response.write(
                         f"data: {json.dumps(search_event)}\n\n".encode()
