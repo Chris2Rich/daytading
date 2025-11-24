@@ -103,7 +103,7 @@ class SearchTool:
                 return q, ep, "Search error or no results."  
 
         results = await asyncio.gather(*[run(p) for p in pairs])  
-        return self.build_context(results), pairs
+        return self.build_context(results), pairs[0]["q"]
 
     # -------------------------------------------------------------  
     # QUERY GENERATION  

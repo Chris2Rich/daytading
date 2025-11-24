@@ -229,6 +229,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         if search_results:
             formatted_history.append({
                 "role": "system",
+                "query": search_results[1],
                 "content": search_results[0]
             })
         
@@ -315,7 +316,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 # Yield search notification
                 yield {
                     "type": "search_performed",
-                    "query": search_results[1][0],
+                    "query": search_results[1],
                     "results": search_results[0]
                 }
             except Exception as e:
