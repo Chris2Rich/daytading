@@ -308,7 +308,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         """
         # Check if search should be performed
         search_results = None
-        if auto_search and self._should_search(user_message):
+        if auto_search:
             try:
                 search_results = await self.search_tool.multi_search(user_message)
                 
