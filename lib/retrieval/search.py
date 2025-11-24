@@ -103,7 +103,7 @@ class SearchTool:
                 return q, ep, "Search error or no results."  
 
         results = await asyncio.gather(*[run(p) for p in pairs])  
-        return self.build_context(results)  
+        return self.build_context(results), pairs
 
     # -------------------------------------------------------------  
     # QUERY GENERATION  
@@ -118,7 +118,8 @@ class SearchTool:
             {"role": "system", "content": (  
                 "Generate 3-6 search tasks as JSON array.\n"  
                 "Each item must be an object: {\"q\": string, \"endpoint\": \"web\" | \"news\", \"start_date\": \"YYYY-MM-DD\"?, \"end_date\": \"YYYY-MM-DD\"?}.\n"  
-                "Choose endpoint='news' for time-sensitive topics, finance, or recent events.\n"  
+                "Choose endpoint='news' for time-sensitive topics, finance, or recent events.\n"
+                "Think hard about what questions will give the best answers. \n"
                 "Return ONLY the JSON array. No commentary."  
             )},  
             {"role": "user", "content": user_message}  

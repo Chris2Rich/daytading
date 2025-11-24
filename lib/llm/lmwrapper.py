@@ -183,38 +183,6 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         super().__init__(*args, **kwargs)
         self.search_tool = SearchTool(self)
 
-    def _should_search(self, user_message: str) -> bool:
-        """
-        Determine if the user message requires web search.
-        
-        Uses simple heuristics to detect search intent.
-        """
-        search_indicators = [
-            'search', 'find', 'look up', 'latest', 'recent', 'news',
-            'current', 'today', 'price', 'stock', "what", "where", "who", "why", "how", "?"
-        ]
-        
-        message_lower = user_message.lower()
-        return any(indicator in message_lower for indicator in search_indicators)
-    
-    def _extract_search_query(self, user_message: str) -> str:
-        """
-        Extract a clean search query from the user message.
-        
-        Simple extraction - can be enhanced with LLM in future.
-        """
-        # Remove common question words and clean up
-        query = user_message.strip()
-        
-        # Remove question marks and extra whitespace
-        query = query.replace('?', '').strip()
-        
-        # Limit length for search API
-        if len(query) > 100:
-            query = query[:100]
-        
-        return query
-
     async def stream_async_with_context(
         self,
         user_message: str,
@@ -244,8 +212,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         search_results = None
         if "search" in requested_tools:
             try:
-                search_query = self._extract_search_query(user_message)
-                search_results = await self.search_tool.multi_search(search_query)
+                search_results = await self.search_tool.multi_search(user_message)
             except Exception as e:
                 print(f"Search failed: {e}")
                 # Continue without search results
@@ -262,7 +229,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         if search_results:
             formatted_history.append({
                 "role": "system",
-                "content": search_results
+                "content": search_results[0]
             })
         
         # Step 4: Add user message
@@ -284,17 +251,21 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             - Description: Displays an interactive stock price chart for a given ticker symbol over a specified number of days.
             - When to use: Use this when the user asks for a stock chart, price history, or to visualize a stock's performance over time. Even if the user does not explicitly request this, if it would be useful, include a graph.
             - If user defines a specific duration, make sure to obey that duration.
-            - Format: :::stock_chart\n{"ticker": "TICKER_SYMBOL", "days": NUMBER_OF_DAYS}\n:::
-            - Example: To show a 90-day chart for Apple Inc., you would output:
+            - Format: :::stock_chart\n{"ticker": "TICKER_SYMBOL"}\n:::
+            - Example: To show a chart for Apple Inc., you would output:
               :::stock_chart
-              {"ticker": "AAPL", "days": 90}
+              {"ticker": "AAPL"}
               :::
-            - Important: Always use a valid JSON object for the parameters. The "ticker" is a string and "days" is a number. Default to 30 days if not specified.
+            - Important: Always use a valid JSON object for the parameters. The "ticker" is a string.
             """,
         }
         
         base_instructions = """
-        You are a helpful AI assistant with access to visualization tools.
+        You are a helpful AI assistant. Your name is ZECA and you were developed by a company known as Zecant.
+        
+        GENERATION RULES:
+        You are incorrect unless you have evidence that can back up your facts, figures and hypotheses, do not rely on your own knowledge to make statements.
+
 
         IMPORTANT FORMATTING RULES:
         - For mathematical expressions:
@@ -339,14 +310,13 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         search_results = None
         if auto_search and self._should_search(user_message):
             try:
-                search_query = self._extract_search_query(user_message)
-                search_results = await self.search_tool.search(search_query, max_results=8)
+                search_results = await self.search_tool.multi_search(user_message)
                 
                 # Yield search notification
                 yield {
                     "type": "search_performed",
-                    "query": search_query,
-                    "results": search_results
+                    "query": search_results[1][0],
+                    "results": search_results[0]
                 }
             except Exception as e:
                 print(f"Search failed: {e}")
