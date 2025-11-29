@@ -42,9 +42,9 @@ routers = {
 class LM_WRAPPER:
     def __init__(
         self,
-        model: str = routers["OPENROUTER"]["models"]["deepseekv3.1"],
-        temperature: float = 0.0,
-        provider: str = "OPENROUTER",
+        model: str = routers["GROQ"]["models"]["gptoss120"],
+        temperature: float = 0.35,
+        provider: str = "GROQ",
     ):
 
         self.lm = dspy.LM(
