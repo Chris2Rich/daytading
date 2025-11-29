@@ -42,7 +42,7 @@ routers = {
 class LM_WRAPPER:
     def __init__(
         self,
-        model: str = routers["GROQ"]["models"]["gptoss120"],
+        model: str = routers["GROQ"]["models"]["llama8b"],
         temperature: float = 0.35,
         provider: str = "GROQ",
     ):
