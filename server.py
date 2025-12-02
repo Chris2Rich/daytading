@@ -37,8 +37,8 @@ clerk = Clerk(bearer_auth=CLERK_SECRET_KEY)
 jwks_client = PyJWKClient(CLERK_JWKS_URL)
 
 # Initialize LLM and Database
-lm = LM_WRAPPER_WITH_TOOLS(routers["GROQ"]["models"]["gptoss120"])
-titlelm = LM_WRAPPER(routers["GROQ"]["models"]["gptoss120"])
+lm = LM_WRAPPER_WITH_TOOLS(routers["GROQ"]["models"]["llama4scout"])
+titlelm = LM_WRAPPER(routers["GROQ"]["models"]["llama8b"])
 db = Database()
 
 
