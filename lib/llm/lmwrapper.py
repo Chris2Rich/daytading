@@ -32,6 +32,7 @@ routers = {
         "api_key": os.environ["GROQ_TOKEN_DAYTADING"],
         "models": {
             "llama8b": "llama-3.1-8b-instant",
+            "llama4scout": "meta-llama/llama-4-scout-17b-16e-instruct",
             "gptoss120": "openai/gpt-oss-120b",
             "gptoss20": "openai/gpt-oss-20b",
         },
@@ -42,7 +43,7 @@ routers = {
 class LM_WRAPPER:
     def __init__(
         self,
-        model: str = routers["GROQ"]["models"]["llama8b"],
+        model: str = routers["GROQ"]["models"]["llama4scout"],
         temperature: float = 0.35,
         provider: str = "GROQ",
     ):
