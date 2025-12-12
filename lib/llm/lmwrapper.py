@@ -359,6 +359,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         - Be Concise: Get to the point quickly, avoid unnecessary preamble
         - Think Step-by-Step: For complex queries, break down your reasoning
         - Admit Uncertainty: If you don't know, say so - don't fabricate information
+        - Do not halucinate information
 
         SEARCH RESULTS USAGE:
         - When search results are provided, prioritize them over your training data

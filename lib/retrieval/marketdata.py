@@ -262,5 +262,6 @@ class MarketDataTool:
         
         # Combine all contexts
         combined_context = "\n\n".join(contexts)
+        print(combined_context)
         return combined_context, valid_tickers
 
