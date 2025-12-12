@@ -223,11 +223,11 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         prompt = [
             {
                 "role": "system",
-                "content": "You are a classifier. Determine if a user query asks about stock prices, financial data, company fundamentals, or market information. Answer with ONLY 'YES' or 'NO'."
+                "content": "You are a classifier. Determine if a user query would be better answered with market data about stock prices, financial data, company fundamentals, or market information. Answer with ONLY 'YES' or 'NO'."
             },
             {
                 "role": "user",
-                "content": f"Does this query ask about stock prices, financial data, or company fundamentals? Answer YES or NO only:\n\n{user_message}"
+                "content": f"Would this query be better answered with market data about stock prices, financial data, or company fundamentals? Answer YES or NO only:\n\n{user_message}"
             }
         ]
         
