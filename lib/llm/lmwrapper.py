@@ -298,10 +298,11 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         # Step 4: Fetch market data if enabled and needed
         market_data_context = None
         market_data_tickers = []
-        if "market_data" in (requested_tools or []):
+        if "market_data" in (requested_tools):
             try:
                 if await self.should_fetch_market_data(user_message):
                     market_data_context, market_data_tickers = await self.market_data_tool.fetch_data(user_message)
+                    print(market_data_context)
             except Exception as e:
                 print(f"Market data fetch failed: {e}")
         
