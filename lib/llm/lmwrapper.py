@@ -11,6 +11,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
 from lib.retrieval.search import SearchTool
+from lib.retrieval.marketdata import MarketDataTool
 
 routers = {
     "OPENROUTER": {
@@ -183,6 +184,59 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.search_tool = SearchTool(self)
+        self.market_data_tool = MarketDataTool()
+        # Initialize light model for quick checks (same as title generation)
+        self.light_model = LM_WRAPPER(
+            model=routers["GROQ"]["models"]["llama8b"],
+            temperature=0.1,
+            provider="GROQ"
+        )
+    
+    async def should_perform_search(self, user_message: str) -> bool:
+        """
+        Use light model to determine if query requires web search.
+        Returns True if search is needed, False otherwise.
+        """
+        prompt = [
+            {
+                "role": "system",
+                "content": "You are a classifier. Determine if a user query requires searching the internet for current, recent, or real-time information. Answer with ONLY 'YES' or 'NO'."
+            },
+            {
+                "role": "user",
+                "content": f"Does this query require searching the internet for current/recent information? Answer YES or NO only:\n\n{user_message}"
+            }
+        ]
+        
+        response = ""
+        async for token in self.light_model.stream_async(prompt, max_tokens=10):
+            response += token
+        
+        response = response.strip().upper()
+        return "YES" in response or response.startswith("Y")
+
+    async def should_fetch_market_data(self, user_message: str) -> bool:
+        """
+        Use light model to determine if query mentions stocks and needs market data.
+        Returns True if market data is needed, False otherwise.
+        """
+        prompt = [
+            {
+                "role": "system",
+                "content": "You are a classifier. Determine if a user query asks about stock prices, financial data, company fundamentals, or market information. Answer with ONLY 'YES' or 'NO'."
+            },
+            {
+                "role": "user",
+                "content": f"Does this query ask about stock prices, financial data, or company fundamentals? Answer YES or NO only:\n\n{user_message}"
+            }
+        ]
+        
+        response = ""
+        async for token in self.light_model.stream_async(prompt, max_tokens=10):
+            response += token
+        
+        response = response.strip().upper()
+        return "YES" in response or response.startswith("Y")
 
     async def stream_async_with_context(
         self,
@@ -224,13 +278,14 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 "content": msg.get("content", "")
             })
         
-        # Step 3: Perform search if enabled
+        # Step 3: Perform search if enabled and needed
         search_context = None
         if "search" in (requested_tools or []):
             try:
-                search_results, query = await self.search_tool.multi_search(user_message)
-                # Format search results MORE CLEARLY
-                search_context = f"""
+                if await self.should_perform_search(user_message):
+                    search_results, query = await self.search_tool.multi_search(user_message)
+                    # Format search results MORE CLEARLY
+                    search_context = f"""
     SEARCH RESULTS for query: "{query}"
 
     {search_results}
@@ -240,17 +295,33 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             except Exception as e:
                 print(f"Search failed: {e}")
         
-        # Step 4: Build user message with search context
+        # Step 4: Fetch market data if enabled and needed
+        market_data_context = None
+        market_data_tickers = []
+        if "market_data" in (requested_tools or []):
+            try:
+                if await self.should_fetch_market_data(user_message):
+                    market_data_context, market_data_tickers = await self.market_data_tool.fetch_data(user_message)
+            except Exception as e:
+                print(f"Market data fetch failed: {e}")
+        
+        # Step 5: Build user message with search and market data context
         final_user_message = user_message
+        contexts = []
         if search_context:
-            final_user_message = f"{search_context}\n\nUser Question: {user_message}"
+            contexts.append(search_context)
+        if market_data_context:
+            contexts.append(market_data_context)
+        
+        if contexts:
+            final_user_message = "\n\n".join(contexts) + f"\n\nUser Question: {user_message}"
         
         formatted_history.append({
             "role": "user",
             "content": final_user_message
         })
 
-        # Step 5: Stream response
+        # Step 6: Stream response
         async for token in self.stream_async(formatted_history, max_tokens):
             yield token
 
@@ -271,6 +342,12 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
               {"ticker": "AAPL"}
               :::
             - Important: Always use a valid JSON object for the parameters. The "ticker" is a string.
+            """,
+            "market_data": """
+            - Tool Name: `market_data`
+            - Description: Market data and fundamentals are automatically fetched and provided in your context when users ask about stocks.
+            - When to use: This tool runs automatically - you don't need to call it. When market data is provided in the context, use it to answer questions about stock prices, financial metrics, company fundamentals, and analyst recommendations.
+            - Important: Always reference the provided market data when answering questions about stocks. The data includes current prices, recent trading history, key financial metrics, and analyst recommendations.
             """,
         }
         
@@ -324,29 +401,45 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             Dicts with:
                 - {"type": "token", "content": str} for text tokens
                 - {"type": "search_performed", "query": str, "results": dict} when search happens
+                - {"type": "market_data_fetched", "tickers": List[str]} when market data is fetched
         """
         # Check if search should be performed
         search_results = None
-        if auto_search:
+        if auto_search and "search" in (requested_tools or []):
             try:
-                search_results = await self.search_tool.multi_search(user_message)
-                
-                # Yield search notification
-                yield {
-                    "type": "search_performed",
-                    "query": search_results[1],
-                    "results": search_results[0]
-                }
+                if await self.should_perform_search(user_message):
+                    search_results = await self.search_tool.multi_search(user_message)
+                    
+                    # Yield search notification
+                    yield {
+                        "type": "search_performed",
+                        "query": search_results[1],
+                        "results": search_results[0]
+                    }
             except Exception as e:
                 print(f"Search failed: {e}")
         
-        # Stream response with search results in context
+        # Check if market data should be fetched
+        market_data_tickers = []
+        if "market_data" in (requested_tools or []):
+            try:
+                if await self.should_fetch_market_data(user_message):
+                    market_data_context, market_data_tickers = await self.market_data_tool.fetch_data(user_message)
+                    if market_data_tickers:
+                        yield {
+                            "type": "market_data_fetched",
+                            "tickers": market_data_tickers
+                        }
+            except Exception as e:
+                print(f"Market data fetch failed: {e}")
+        
+        # Stream response with search results and market data in context
         async for token in self.stream_async_with_context(
             user_message,
             chat_history,
             requested_tools,
             max_tokens,
-            auto_search=False  # Already searched above
+            auto_search=False  # Already handled above
         ):
             yield {
                 "type": "token",

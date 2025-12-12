@@ -214,6 +214,16 @@ async def handle_generate(request):
                     await response.write(
                         f"data: {json.dumps(token_data)}\n\n".encode()
                     )
+                
+                elif token_data["type"] == "market_data_fetched":
+                    # Forward market data event to frontend
+                    market_data_event = {
+                        "type": "market_data_fetched",
+                        "tickers": token_data.get("tickers", []),
+                    }
+                    await response.write(
+                        f"data: {json.dumps(market_data_event)}\n\n".encode()
+                    )
             
             # Store assistant message
             assistant_message_id = await db.add_message(
