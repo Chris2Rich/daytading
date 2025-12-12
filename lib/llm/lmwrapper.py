@@ -213,6 +213,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             response += token
         
         response = response.strip().upper()
+        print("should_perform_search", response)
         return "YES" in response or response.startswith("Y")
 
     async def should_fetch_market_data(self, user_message: str) -> bool:
@@ -235,6 +236,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         async for token in self.light_model.stream_async(prompt, max_tokens=10):
             response += token
         
+        print("should_fetch_market_data", response)
         response = response.strip().upper()
         return "YES" in response or response.startswith("Y")
 
@@ -300,7 +302,9 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         market_data_tickers = []
         if "market_data" in (requested_tools):
             try:
-                if await self.should_fetch_market_data(user_message):
+                market_data_needed = await self.should_fetch_market_data(user_message)
+                print(market_data_needed)
+                if market_data_needed:
                     market_data_context, market_data_tickers = await self.market_data_tool.fetch_data(user_message)
                     print(market_data_context)
             except Exception as e:
