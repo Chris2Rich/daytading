@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 import yfinance as yf
 import pandas as pd
+import json
 
 os.environ['YFINANCE_QUIET'] = '1'
 
@@ -14,6 +15,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from lib.retrieval.yahoofinance import get_price_targets
 
+f = open("daytading\data\cik\cikmap.json")
+tickers = list((json.load(f).keys()))
 
 class MarketDataTool:
     """Tool for fetching and formatting market data and fundamentals"""
@@ -26,30 +29,9 @@ class MarketDataTool:
         Extract stock ticker symbols from user message.
         Looks for uppercase 1-5 letter ticker symbols.
         """
-        # Pattern for stock tickers: 1-5 uppercase letters, possibly followed by punctuation
-        # Common tickers: AAPL, MSFT, GOOGL, TSLA, etc.
-        pattern = r'\b([A-Z]{1,5})\b'
+        matches = list(filter(lambda s: f" {s} " in user_message, tickers))
         
-        # Find all potential matches
-        matches = re.findall(pattern, user_message)
-        
-        # Filter out common words that match the pattern
-        common_words = {
-            'A', 'I', 'AM', 'AN', 'AS', 'AT', 'BE', 'BY', 'DO', 'GO', 'HE', 'IF', 'IN', 'IS', 'IT', 'ME', 'MY', 'NO', 'OF', 'ON', 'OR', 'SO', 'TO', 'UP', 'US', 'WE'
-        }
-        
-        # Also filter out very short common abbreviations
-        tickers = [m for m in matches if m not in common_words and len(m) >= 2]
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_tickers = []
-        for ticker in tickers:
-            if ticker not in seen:
-                seen.add(ticker)
-                unique_tickers.append(ticker)
-        
-        return unique_tickers[:5]  # Limit to 5 tickers max
+        return matches[:10]
 
     async def fetch_market_data(self, ticker: str) -> Dict[str, Any]:
         """

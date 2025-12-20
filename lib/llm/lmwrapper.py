@@ -409,7 +409,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         """
         # Check if search should be performed
         search_results = None
-        if auto_search and "search" in (requested_tools or []):
+        if auto_search and "search" in (requested_tools):
             try:
                 if await self.should_perform_search(user_message):
                     search_results = await self.search_tool.multi_search(user_message)
@@ -424,8 +424,9 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 print(f"Search failed: {e}")
         
         # Check if market data should be fetched
+        market_data_context = None
         market_data_tickers = []
-        if "market_data" in (requested_tools or []):
+        if "market_data" in (requested_tools):
             try:
                 if await self.should_fetch_market_data(user_message):
                     market_data_context, market_data_tickers = await self.market_data_tool.fetch_data(user_message)
