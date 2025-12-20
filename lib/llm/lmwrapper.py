@@ -244,10 +244,23 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         chat_history: List[Dict[str, Any]],
         requested_tools: Optional[List[str]] = None,
         max_tokens: int = 4000,
-        temperature: Optional[float] = None,  # Add this
-        auto_search: bool = True,
+        temperature: Optional[float] = None,
+        # FIX #1: Add parameters to accept pre-fetched tool results
+        search_context: Optional[str] = None,
+        market_data_context: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        """Stream response with improved context handling."""
+        """
+        Stream response with improved context handling.
+        
+        Args:
+            user_message: The user's message
+            chat_history: Previous conversation history
+            requested_tools: List of tool names that are enabled
+            max_tokens: Maximum tokens to generate
+            temperature: Override temperature (optional)
+            search_context: Pre-fetched search results context (optional)
+            market_data_context: Pre-fetched market data context (optional)
+        """
 
         if temperature is None:
             # Lower temperature for factual/search queries
@@ -257,78 +270,55 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             else:
                 temperature = self.temperature
         
-        # Store original and temporarily override
+        # FIX #3: Store original and use try/finally to ensure reset
         original_temp = self.temperature
-        self.temperature = temperature
         
-        formatted_history = []
-        
-        # Step 1: System instructions FIRST
-        if requested_tools:
-            tool_instructions = self._get_tool_instructions(requested_tools)
+        try:
+            self.temperature = temperature
+            
+            formatted_history = []
+            
+            # Step 1: System instructions FIRST
+            if requested_tools:
+                tool_instructions = self._get_tool_instructions(requested_tools)
+                formatted_history.append({
+                    "role": "system",
+                    "content": tool_instructions
+                })
+            
+            # Step 2: Add chat history (critical for context!)
+            for msg in chat_history:
+                formatted_history.append({
+                    "role": msg.get("role", "user"),
+                    "content": msg.get("content", "")
+                })
+            
+            # FIX #1: Remove duplicate tool execution - use passed contexts
+            # No longer fetching tools here, they're passed as parameters
+            
+            # Step 3: Build user message with provided contexts
+            final_user_message = user_message
+            contexts = []
+            if search_context:
+                contexts.append(search_context)
+            if market_data_context:
+                contexts.append(market_data_context)
+            
+            if contexts:
+                final_user_message = "\n\n".join(contexts) + f"\n\nUser Question: {user_message}"
+            
             formatted_history.append({
-                "role": "system",
-                "content": tool_instructions
+                "role": "user",
+                "content": final_user_message
             })
-        
-        # Step 2: Add chat history (critical for context!)
-        for msg in chat_history:
-            formatted_history.append({
-                "role": msg.get("role", "user"),
-                "content": msg.get("content", "")
-            })
-        
-        # Step 3: Perform search if enabled and needed
-        search_context = None
-        if "search" in (requested_tools or []):
-            try:
-                if await self.should_perform_search(user_message):
-                    search_results, query = await self.search_tool.multi_search(user_message)
-                    # Format search results MORE CLEARLY
-                    search_context = f"""
-    SEARCH RESULTS for query: "{query}"
 
-    {search_results}
-
-    IMPORTANT: Base your response on these search results. Cite sources with [Source: URL].
-    """
-            except Exception as e:
-                print(f"Search failed: {e}")
+            # Step 4: Stream response
+            async for token in self.stream_async(formatted_history, max_tokens):
+                yield token
         
-        # Step 4: Fetch market data if enabled and needed
-        market_data_context = None
-        market_data_tickers = []
-        if "market_data" in (requested_tools):
-            try:
-                market_data_needed = await self.should_fetch_market_data(user_message)
-                if market_data_needed:
-                    print("fetching market data")
-                    market_data_context, market_data_tickers = await self.market_data_tool.fetch_data(user_message)
-                    print(market_data_context)
-            except Exception as e:
-                print(f"Market data fetch failed: {e}")
-        
-        # Step 5: Build user message with search and market data context
-        final_user_message = user_message
-        contexts = []
-        if search_context:
-            contexts.append(search_context)
-        if market_data_context:
-            contexts.append(market_data_context)
-        
-        if contexts:
-            final_user_message = "\n\n".join(contexts) + f"\n\nUser Question: {user_message}"
-        
-        formatted_history.append({
-            "role": "user",
-            "content": final_user_message
-        })
-
-        # Step 6: Stream response
-        async for token in self.stream_async(formatted_history, max_tokens):
-            yield token
-
-        self.temperature = original_temp
+        finally:
+            # FIX #3: Always reset temperature, even if error occurs
+            self.temperature = original_temp
 
     def _get_tool_instructions(self, tools: List[str]) -> str:
         """Generate system instructions for available tools"""
@@ -404,24 +394,44 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         Yields:
             Dicts with:
                 - {"type": "token", "content": str} for text tokens
-                - {"type": "search_performed", "query": str, "results": dict} when search happens
+                - {"type": "search_performed", "query": str, "results": str} when search happens
                 - {"type": "market_data_fetched", "tickers": List[str]} when market data is fetched
         """
+        
+        # FIX #1: Execute tools ONCE and store contexts
+        search_context = None
+        search_query = None
+        
         # Check if search should be performed
-        search_results = None
-        if auto_search and "search" in (requested_tools):
+        if auto_search and "search" in (requested_tools or []):
             try:
                 if await self.should_perform_search(user_message):
-                    search_results = await self.search_tool.multi_search(user_message)
+                    search_results, query = await self.search_tool.multi_search(user_message)
+                    search_query = query
                     
-                    # Yield search notification
+                    # Format search context for LLM
+                    search_context = f"""
+SEARCH RESULTS for query: "{query}"
+
+{search_results}
+
+IMPORTANT: Base your response on these search results. Cite sources with [Source: URL].
+"""
+                    
+                    # Yield search notification to frontend
                     yield {
                         "type": "search_performed",
-                        "query": search_results[1],
-                        "results": search_results[0]
+                        "query": query,
+                        "results": search_results[:500]  # Send summary to frontend
                     }
             except Exception as e:
                 print(f"Search failed: {e}")
+                # Yield error event
+                yield {
+                    "type": "tool_error",
+                    "tool": "search",
+                    "error": str(e)
+                }
         
         # Check if market data should be fetched
         market_data_context = None
@@ -430,21 +440,31 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             try:
                 if await self.should_fetch_market_data(user_message):
                     market_data_context, market_data_tickers = await self.market_data_tool.fetch_data(user_message)
+                    
                     if market_data_tickers:
+                        # Yield market data notification to frontend
                         yield {
                             "type": "market_data_fetched",
                             "tickers": market_data_tickers
                         }
             except Exception as e:
                 print(f"Market data fetch failed: {e}")
+                # Yield error event
+                yield {
+                    "type": "tool_error",
+                    "tool": "market_data",
+                    "error": str(e)
+                }
         
-        # Stream response with search results and market data in context
+        # FIX #1: Pass pre-fetched contexts to streaming function
+        # This ensures tools are executed only ONCE and contexts are properly injected
         async for token in self.stream_async_with_context(
-            user_message,
-            chat_history,
-            requested_tools,
-            max_tokens,
-            auto_search=False  # Already handled above
+            user_message=user_message,
+            chat_history=chat_history,
+            requested_tools=requested_tools,
+            max_tokens=max_tokens,
+            search_context=search_context,
+            market_data_context=market_data_context,
         ):
             yield {
                 "type": "token",
