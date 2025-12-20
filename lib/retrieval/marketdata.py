@@ -15,8 +15,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from lib.retrieval.yahoofinance import get_price_targets
 
-print(os.getcwd())
-f = open("daytading/data/cik/cikmap.json")
+f = open("./data/cik/cikmap.json")
 tickers = list((json.load(f).keys()))
 
 class MarketDataTool:
