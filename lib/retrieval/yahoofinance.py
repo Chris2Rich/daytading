@@ -128,16 +128,17 @@ def get_key_metrics_timeseries(ticker: str, period: str = "quarterly"):
         income = stock.quarterly_income_stmt
         balance = stock.quarterly_balance_sheet
         cashflow = stock.quarterly_cashflow
-        earnings = stock.quarterly_earnings
     else:
         income = stock.income_stmt
         balance = stock.balance_sheet
         cashflow = stock.cashflow
-        earnings = stock.earnings
     
     def extract_metric(df, metric_name):
         """Helper to extract a metric from dataframe"""
         # Try different variations of the metric name
+        if df is None:
+            return {}
+
         variations = [
             metric_name,
             metric_name.title(),
@@ -155,12 +156,18 @@ def get_key_metrics_timeseries(ticker: str, period: str = "quarterly"):
                 return df.loc[idx].to_dict()
         
         return {}
-    
+
+    if "Net Income" in income.index and "Common Shares Outstanding" in stock.info:
+        eps_series = {date: float(net_income / stock.info["sharesOutstanding"])
+                    for date, net_income in income.loc["Net Income"].items()}
+    else:
+        eps_series = {}
+
     # Extract key metrics
     metrics = {
         "revenue": extract_metric(income, "Total Revenue"),
         "net_income": extract_metric(income, "Net Income"),
-        "eps": earnings["Earnings"].to_dict() if "Earnings" in earnings.columns else {},
+        "eps": eps_series,
         "operating_income": extract_metric(income, "Operating Income"),
         "gross_profit": extract_metric(income, "Gross Profit"),
         "total_assets": extract_metric(balance, "Total Assets"),
