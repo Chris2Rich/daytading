@@ -157,17 +157,10 @@ def get_key_metrics_timeseries(ticker: str, period: str = "quarterly"):
         
         return {}
 
-    if "Net Income" in income.index and "Common Shares Outstanding" in stock.info:
-        eps_series = {date: float(net_income / stock.info["sharesOutstanding"])
-                    for date, net_income in income.loc["Net Income"].items()}
-    else:
-        eps_series = {}
-
     # Extract key metrics
     metrics = {
         "revenue": extract_metric(income, "Total Revenue"),
         "net_income": extract_metric(income, "Net Income"),
-        "eps": eps_series,
         "operating_income": extract_metric(income, "Operating Income"),
         "gross_profit": extract_metric(income, "Gross Profit"),
         "total_assets": extract_metric(balance, "Total Assets"),

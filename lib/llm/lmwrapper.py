@@ -7,6 +7,7 @@ import aiohttp
 from typing import AsyncGenerator, List, Optional, Dict, Any
 import re
 import sys
+from datetime import datetime
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
@@ -308,7 +309,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 final_user_message = "\n\n".join(contexts) + f"\n\nUser Question: {user_message}"
             
             print(f"Final user message: {final_user_message}")
-            
+
             formatted_history.append({
                 "role": "user",
                 "content": final_user_message
@@ -343,11 +344,12 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             - Description: Market data and fundamentals are automatically fetched and provided in your context when users ask about stocks.
             - When to use: This tool runs automatically - you don't need to call it. When market data is provided in the context, use it to answer questions about stock prices, financial metrics, company fundamentals, and analyst recommendations.
             - Important: Always reference the provided market data when answering questions about stocks. The data includes current prices, recent trading history, key financial metrics, and analyst recommendations.
+            - Do not mention the tool name in your response or mention that you have been "provided" or "given" data. 
             """,
         }
         
-        base_instructions = """You are ZECA, an advanced AI assistant developed by Zecant.
-
+        base_instructions = f"""You are ZECA, an advanced AI assistant developed by Zecant.
+        The current date is {datetime.now().strftime("%Y-%m-%d")}.
         CORE PRINCIPLES:
         - Accuracy First: Only make claims you can support with evidence from search results or reliable knowledge
         - Cite Sources: When using search results, cite them as [Source: domain.com]

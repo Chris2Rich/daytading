@@ -54,11 +54,11 @@ class MarketDataTool:
             for idx, row in weekly_df.iterrows():
                 weekly_price_timeseries.append({
                     "date": idx.isoformat() if hasattr(idx, "isoformat") else str(idx),
-                    "open": float(row["Open"].iloc[0]) if isinstance(row["Open"], pd.Series) else float(row["Open"]),
-                    "high": float(row["High"].iloc[0]) if isinstance(row["High"], pd.Series) else float(row["High"]),
-                    "low": float(row["Low"].iloc[0]) if isinstance(row["Low"], pd.Series) else float(row["Low"]),
-                    "close": float(row["Close"].iloc[0]) if isinstance(row["Close"], pd.Series) else float(row["Close"]),
-                    "volume": float(row["Volume"].iloc[0]) if "Volume" in row and isinstance(row["Volume"], pd.Series) else float(row["Volume"]) if "Volume" in row else None,
+                    "open": round(float(row["Open"].iloc[0]), 2) if isinstance(row["Open"], pd.Series) else round(float(row["Open"]), 2),
+                    "high": round(float(row["High"].iloc[0]), 2) if isinstance(row["High"], pd.Series) else round(float(row["High"]), 2),
+                    "low": round(float(row["Low"].iloc[0]), 2) if isinstance(row["Low"], pd.Series) else round(float(row["Low"]), 2),
+                    "close": round(float(row["Close"].iloc[0]), 2) if isinstance(row["Close"], pd.Series) else round(float(row["Close"]), 2),
+                    "volume": int(row["Volume"].iloc[0]) if "Volume" in row and isinstance(row["Volume"], pd.Series) else int(row["Volume"]) if "Volume" in row else None,
                 })
 
         # ============================================================
