@@ -344,6 +344,129 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             - Important: Always reference the provided market data when answering questions about stocks. The data includes current prices, recent trading history, key financial metrics, and analyst recommendations.
             - Do not mention the tool name in your response or mention that you have been "provided" or "given" data. Don't say things like "with the provided data..."
             """,
+            "graph": """
+            - Tool Name: `graph`
+            - Description: Creates interactive data visualizations including line charts, bar charts, area charts, scatter plots, pie charts, and combination charts. Perfect for displaying financial data, trends, comparisons, and distributions.
+            - When to use: Use when the user needs to visualize data trends, compare metrics, show distributions, or analyze relationships between variables. Include graphs proactively when they would enhance understanding of numerical data or trends being discussed.
+            - Format: :::graph
+            {JSON_CONFIG}
+            :::
+
+            - Parameters (JSON object):
+            - "type" (required): Chart type - one of: "line", "bar", "area", "scatter", "pie", "combo"
+            - "title" (optional): Chart title string
+            - "data" (required): Array of data objects
+            - "xAxis" (required): Configuration object with:
+                - "key": The data field for x-axis
+                - "label" (optional): Axis label
+            - "yAxis" (required for non-pie charts): Configuration object with:
+                - "key": The data field for y-axis (or array of keys for multiple series)
+                - "label" (optional): Axis label
+            - "series" (optional): Array of series objects for multi-line/bar charts, each with:
+                - "key": Data field to plot
+                - "name": Display name for legend
+                - "color" (optional): Hex color code
+                - "type" (optional, for combo charts): "line" or "bar"
+            - "colors" (optional): Array of hex color codes for styling
+            - "height" (optional): Chart height in pixels (default: 300)
+
+            - Examples:
+
+            1. Simple line chart:
+            :::graph
+            {
+                "type": "line",
+                "title": "Revenue Growth (2020-2024)",
+                "data": [
+                {"year": "2020", "revenue": 274.5},
+                {"year": "2021", "revenue": 365.8},
+                {"year": "2022", "revenue": 394.3},
+                {"year": "2023", "revenue": 383.3},
+                {"year": "2024", "revenue": 391.0}
+                ],
+                "xAxis": {"key": "year", "label": "Year"},
+                "yAxis": {"key": "revenue", "label": "Revenue (Billions USD)"}
+            }
+            :::
+
+            2. Multi-series comparison:
+            :::graph
+            {
+                "type": "line",
+                "title": "Revenue vs Operating Income",
+                "data": [
+                {"quarter": "Q1", "revenue": 97.3, "income": 28.6},
+                {"quarter": "Q2", "revenue": 94.8, "income": 26.7},
+                {"quarter": "Q3", "revenue": 89.5, "income": 22.9},
+                {"quarter": "Q4", "revenue": 109.4, "income": 33.9}
+                ],
+                "xAxis": {"key": "quarter"},
+                "series": [
+                {"key": "revenue", "name": "Revenue", "color": "#10b981"},
+                {"key": "income", "name": "Operating Income", "color": "#3b82f6"}
+                ],
+                "yAxis": {"label": "USD (Billions)"}
+            }
+            :::
+
+            3. Bar chart:
+            :::graph
+            {
+                "type": "bar",
+                "title": "Market Share by Company",
+                "data": [
+                {"company": "Apple", "share": 28.5},
+                {"company": "Samsung", "share": 24.3},
+                {"company": "Xiaomi", "share": 12.8},
+                {"company": "Others", "share": 34.4}
+                ],
+                "xAxis": {"key": "company"},
+                "yAxis": {"key": "share", "label": "Market Share (%)"}
+            }
+            :::
+
+            4. Pie chart:
+            :::graph
+            {
+                "type": "pie",
+                "title": "Portfolio Allocation",
+                "data": [
+                {"category": "Stocks", "value": 60},
+                {"category": "Bonds", "value": 25},
+                {"category": "Cash", "value": 10},
+                {"category": "Real Estate", "value": 5}
+                ],
+                "xAxis": {"key": "category"},
+                "yAxis": {"key": "value"}
+            }
+            :::
+
+            5. Combo chart (bars + line):
+            :::graph
+            {
+                "type": "combo",
+                "title": "Sales Volume and Average Price",
+                "data": [
+                {"month": "Jan", "volume": 1200, "price": 45.3},
+                {"month": "Feb", "volume": 1350, "price": 46.8},
+                {"month": "Mar", "volume": 1100, "price": 44.2}
+                ],
+                "xAxis": {"key": "month"},
+                "series": [
+                {"key": "volume", "name": "Volume", "type": "bar", "color": "#3b82f6"},
+                {"key": "price", "name": "Avg Price", "type": "line", "color": "#10b981"}
+                ]
+            }
+            :::
+
+            - Important: 
+            - Always use valid JSON with proper escaping
+            - Ensure data arrays contain consistent objects with matching keys
+            - For financial data, use appropriate precision (typically 2 decimal places)
+            - Choose chart types that best represent the data relationship
+            - Use colors that match the existing design system (greens for positive, reds for negative)
+            - Keep titles concise and descriptive
+            """
         }
         
         base_instructions = f"""You are ZECA, an advanced AI assistant developed by Zecant.
