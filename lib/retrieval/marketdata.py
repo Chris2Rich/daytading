@@ -145,18 +145,24 @@ class MarketDataTool:
                 context += f"- **Market Cap**: {cap_str}\n"
             context += "\n"
         
-        # Trading data summary
+        # Trading data summary - FIX APPLIED HERE
         if data.get('trading_data') is not None and not data['trading_data'].empty:
             trading = data['trading_data']
             context += f"## Recent Trading Data (Last 30 Days)\n"
             if len(trading) > 0:
                 latest = trading.iloc[-1]
-                context += f"- **Latest Close**: ${latest['Close']:.2f}\n"
-                context += f"- **High**: ${latest['High']:.2f}\n"
-                context += f"- **Low**: ${latest['Low']:.2f}\n"
+                # Convert Series values to float explicitly
+                close_val = float(latest['Close'])
+                high_val = float(latest['High'])
+                low_val = float(latest['Low'])
+                
+                context += f"- **Latest Close**: ${close_val:.2f}\n"
+                context += f"- **High**: ${high_val:.2f}\n"
+                context += f"- **Low**: ${low_val:.2f}\n"
+                
                 if len(trading) > 1:
-                    first_close = trading.iloc[0]['Close']
-                    last_close = trading.iloc[-1]['Close']
+                    first_close = float(trading.iloc[0]['Close'])
+                    last_close = float(trading.iloc[-1]['Close'])
                     period_change = ((last_close - first_close) / first_close) * 100 if first_close else None
                     if period_change is not None:
                         context += f"- **30-Day Change**: {period_change:+.2f}%\n"

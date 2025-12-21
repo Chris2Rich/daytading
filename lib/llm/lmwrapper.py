@@ -308,6 +308,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 final_user_message = "\n\n".join(contexts) + f"\n\nUser Question: {user_message}"
             
             print(f"Final user message: {final_user_message}")
+            
             formatted_history.append({
                 "role": "user",
                 "content": final_user_message
