@@ -307,6 +307,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             if contexts:
                 final_user_message = "\n\n".join(contexts) + f"\n\nUser Question: {user_message}"
             
+            print(f"Final user message: {final_user_message}")
             formatted_history.append({
                 "role": "user",
                 "content": final_user_message
@@ -407,7 +408,6 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             try:
                 if await self.should_perform_search(user_message):
                     search_results, query = await self.search_tool.multi_search(user_message)
-                    search_query = query
                     
                     # Format search context for LLM
                     search_context = f"""
