@@ -307,8 +307,6 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             
             if contexts:
                 final_user_message = "\n\n".join(contexts) + f"\n\nUser Question: {user_message}"
-            
-            print(f"Final user message: {final_user_message}")
 
             formatted_history.append({
                 "role": "user",
@@ -344,7 +342,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             - Description: Market data and fundamentals are automatically fetched and provided in your context when users ask about stocks.
             - When to use: This tool runs automatically - you don't need to call it. When market data is provided in the context, use it to answer questions about stock prices, financial metrics, company fundamentals, and analyst recommendations.
             - Important: Always reference the provided market data when answering questions about stocks. The data includes current prices, recent trading history, key financial metrics, and analyst recommendations.
-            - Do not mention the tool name in your response or mention that you have been "provided" or "given" data. 
+            - Do not mention the tool name in your response or mention that you have been "provided" or "given" data. Don't say things like "with the provided data..."
             """,
         }
         
