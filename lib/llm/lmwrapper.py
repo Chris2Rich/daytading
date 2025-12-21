@@ -365,9 +365,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             - "series" (optional): Array of series objects for multi-line/bar charts, each with:
                 - "key": Data field to plot
                 - "name": Display name for legend
-                - "color" (optional): Hex color code
                 - "type" (optional, for combo charts): "line" or "bar"
-            - "colors" (optional): Array of hex color codes for styling
             - "height" (optional): Chart height in pixels (default: 300)
 
             - Examples:
@@ -402,8 +400,8 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 ],
                 "xAxis": {"key": "quarter"},
                 "series": [
-                {"key": "revenue", "name": "Revenue", "color": "#10b981"},
-                {"key": "income", "name": "Operating Income", "color": "#3b82f6"}
+                {"key": "revenue", "name": "Revenue"},
+                {"key": "income", "name": "Operating Income"}
                 ],
                 "yAxis": {"label": "USD (Billions)"}
             }
@@ -453,8 +451,8 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                 ],
                 "xAxis": {"key": "month"},
                 "series": [
-                {"key": "volume", "name": "Volume", "type": "bar", "color": "#3b82f6"},
-                {"key": "price", "name": "Avg Price", "type": "line", "color": "#10b981"}
+                {"key": "volume", "name": "Volume", "type": "bar"},
+                {"key": "price", "name": "Avg Price", "type": "line"}
                 ]
             }
             :::
@@ -464,7 +462,6 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             - Ensure data arrays contain consistent objects with matching keys
             - For financial data, use appropriate precision (typically 2 decimal places)
             - Choose chart types that best represent the data relationship
-            - Use colors that match the existing design system (greens for positive, reds for negative)
             - Keep titles concise and descriptive
             """
         }
