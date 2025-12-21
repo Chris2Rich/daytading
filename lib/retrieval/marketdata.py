@@ -78,7 +78,12 @@ class MarketDataTool:
         # RETURN STRUCTURE
         # ============================================================
 
-        targets = get_price_targets(ticker)["recommendation_history"].to_dict(orient='records')
+        price_targets_info = get_price_targets(ticker)
+        targets_df = price_targets_info.get("recommendation_history")
+        if targets_df is not None and not targets_df.empty:
+            targets = targets_df.to_dict(orient='records')
+        else:
+            targets = []
 
         return {
             "ticker": ticker,
