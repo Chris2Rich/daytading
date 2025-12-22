@@ -85,7 +85,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
     
     try:
         # Get SnapTrade credentials from Clerk
-        user = clerk.users.get(clerk_user_id)
+        user = clerk.users.get(user_id=clerk_user_id)
         snaptrade_user_id = user.private_metadata.get("snaptradeUserId") or clerk_user_id
         snaptrade_user_secret = user.private_metadata.get("snaptradeUserSecret")
         
