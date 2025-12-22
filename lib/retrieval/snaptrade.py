@@ -137,7 +137,20 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
         # Fetch positions and activities for each account
         all_positions = []
         all_activities = []
-        
+        account_ids = [acc["id"] for acc in accounts]
+
+        activities_resp = snaptrade.transactions_and_reporting.get_activities(
+            user_id=snaptrade_user_id,
+            user_secret=snaptrade_user_secret,
+            accounts=account_ids,
+        )
+
+        activities_data = activities_resp.body if hasattr(activities_resp, 'body') else activities_resp
+        if isinstance(activities_data, list):
+            all_activities.extend(activities_data)
+        elif isinstance(activities_data, dict) and "data" in activities_data:
+            all_activities.extend(activities_data["data"])
+
         for account in accounts:
             account_id = account.get("id")
             
@@ -151,20 +164,6 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 positions = positions_resp.body if hasattr(positions_resp, 'body') else positions_resp
                 if positions:
                     all_positions.extend(positions)
-                
-                # Get activities
-                activities_resp = snaptrade.transactions_and_reporting.get_activities(
-                    user_id=snaptrade_user_id,
-                    user_secret=snaptrade_user_secret,
-                    account_id=account_id
-                )
-                activities_data = activities_resp.body if hasattr(activities_resp, 'body') else activities_resp
-                
-                # Extract activities list
-                if isinstance(activities_data, list):
-                    all_activities.extend(activities_data)
-                elif isinstance(activities_data, dict) and "data" in activities_data:
-                    all_activities.extend(activities_data["data"])
                     
             except Exception as e:
                 print(f"Error fetching data for account {account_id}: {e}")
