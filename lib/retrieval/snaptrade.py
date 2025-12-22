@@ -64,14 +64,6 @@ def format_trades(activities: list) -> list:
 async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
     """
     Fetch portfolio data from SnapTrade API.
-    
-    Returns dict with:
-        - accounts: list of account objects
-        - positions: list of position objects
-        - trades: list of formatted trade objects
-        - total_nav: float
-        - connected: bool
-        - error: str (if error occurred)
     """
     if not SNAPTRADE_CLIENT_ID or not SNAPTRADE_SECRET:
         return {
@@ -84,10 +76,15 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
         }
     
     try:
-        # Get SnapTrade credentials from Clerk
-        user = clerk.users.get(user_id=clerk_user_id)
-        snaptrade_user_id = user.private_metadata.get("snaptradeUserId") or clerk_user_id
-        snaptrade_user_secret = user.private_metadata.get("snaptradeUserSecret")
+        # Get SnapTrade credentials from Clerk - users.get returns a User object
+        user_response = clerk.users.get(user_id=clerk_user_id)
+        
+        # The SDK returns a Pydantic model, access private_metadata as an attribute
+        # private_metadata is a dict on the User object
+        private_metadata = user_response.private_metadata or {}
+        
+        snaptrade_user_id = private_metadata.get("snaptradeUserId", clerk_user_id)
+        snaptrade_user_secret = private_metadata.get("snaptradeUserSecret")
         
         if not snaptrade_user_secret:
             return {
@@ -196,18 +193,10 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 "total_nav": total_nav
             }
     
-    except httpx.HTTPError as e:
-        print(f"SnapTrade API error: {e}")
-        return {
-            "connected": True,
-            "error": f"SnapTrade API error: {str(e)}",
-            "accounts": [],
-            "positions": [],
-            "trades": [],
-            "total_nav": 0.0
-        }
     except Exception as e:
         print(f"Error fetching portfolio from SnapTrade: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             "connected": False,
             "error": str(e),
@@ -216,7 +205,6 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             "trades": [],
             "total_nav": 0.0
         }
-
 
 async def get_portfolio_data(
     clerk_user_id: str,
@@ -239,25 +227,28 @@ async def get_portfolio_data(
     # Check if force refresh requested
     if not force_refresh:
         # Try to get from cache
-        cached = await db.get_portfolio_cache(clerk_user_id, max_age_minutes=cache_max_age_minutes)
-        
-        if cached:
-            # Cache hit - return cached data
-            portfolio_data = cached['portfolio_data']
-            cache_age_seconds = (datetime.now(timezone.utc) - cached['last_fetched_at']).total_seconds()
+        try:
+            cached = await db.get_portfolio_cache(clerk_user_id, max_age_minutes=cache_max_age_minutes)
             
-            # FIXED: Add these fields to cached dict instead of unpacking
-            portfolio_data["cached"] = True
-            portfolio_data["cache_age_minutes"] = round(cache_age_seconds / 60, 1)
-            portfolio_data["last_fetched_at"] = cached['last_fetched_at'].isoformat()
-            
-            return portfolio_data
+            if cached and isinstance(cached.get('portfolio_data'), dict):
+                # Cache hit - return cached data
+                portfolio_data = dict(cached['portfolio_data'])  # Make a copy
+                cache_age_seconds = (datetime.now(timezone.utc) - cached['last_fetched_at']).total_seconds()
+                
+                portfolio_data["cached"] = True
+                portfolio_data["cache_age_minutes"] = round(cache_age_seconds / 60, 1)
+                portfolio_data["last_fetched_at"] = cached['last_fetched_at'].isoformat()
+                
+                return portfolio_data
+        except Exception as e:
+            print(f"Cache retrieval error: {e}")
+            # Continue to fetch fresh data
     
     # Cache miss or force refresh - fetch from SnapTrade
     print(f"Fetching fresh portfolio data for user {clerk_user_id}")
     portfolio_data = await fetch_portfolio_from_snaptrade(clerk_user_id)
     
-    # FIXED: Ensure portfolio_data is a dict
+    # Validate portfolio_data is a dict
     if not isinstance(portfolio_data, dict):
         print(f"ERROR: fetch_portfolio_from_snaptrade returned non-dict: {type(portfolio_data)}")
         return {
@@ -273,23 +264,21 @@ async def get_portfolio_data(
         }
     
     # Update cache if successful
-    if portfolio_data.get("connected") and not portfolio_data.get("error"):
-        connection_status = "connected"
-    elif portfolio_data.get("error"):
-        connection_status = "error"
-    else:
-        connection_status = "disconnected"
+    connection_status = "connected" if portfolio_data.get("connected") and not portfolio_data.get("error") else "error" if portfolio_data.get("error") else "disconnected"
     
     try:
+        # Make a copy without cache metadata for storage
+        storage_data = {k: v for k, v in portfolio_data.items() if k not in ['cached', 'cache_age_minutes', 'last_fetched_at']}
+        
         await db.update_portfolio_cache(
             clerk_user_id,
-            portfolio_data,
+            storage_data,
             connection_status
         )
     except Exception as e:
         print(f"Failed to update portfolio cache: {e}")
     
-    # FIXED: Add these fields directly instead of unpacking
+    # Add cache metadata to response
     portfolio_data["cached"] = False
     portfolio_data["cache_age_minutes"] = 0
     portfolio_data["last_fetched_at"] = datetime.now(timezone.utc).isoformat()
