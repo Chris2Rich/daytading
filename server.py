@@ -633,8 +633,10 @@ async def handle_portfolio_data(request):
     clerk_user_id = request["clerk_user_id"]
     
     try:
-        force_refresh = request.query.get("refresh", "").lower() == "true"
+        refresh_param = request.query.get("refresh")
+        force_refresh = str(refresh_param).lower() == "true" if refresh_param is not None else False
         
+        print(f"Received refresh={request.query.get('refresh')}, force_refresh={force_refresh}")
         portfolio_data = await get_portfolio_data(
             clerk_user_id=clerk_user_id,
             db=db,

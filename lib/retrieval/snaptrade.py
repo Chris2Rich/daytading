@@ -289,8 +289,6 @@ async def get_portfolio_data(
         except Exception as e:
             print(f"Cache retrieval error: {e}")
     
-    # Fetch fresh data
-    print(f"Fetching fresh portfolio data for user {clerk_user_id}")
     portfolio_data = await fetch_portfolio_from_snaptrade(clerk_user_id)
     
     if not isinstance(portfolio_data, dict):
