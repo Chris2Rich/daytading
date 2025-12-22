@@ -72,7 +72,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             "accounts": [],
             "positions": [],
             "trades": [],
-            "total_nav": 0.0
+            "totalNav": 0.0
         }
     
     if not SnapTrade:
@@ -82,7 +82,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             "accounts": [],
             "positions": [],
             "trades": [],
-            "total_nav": 0.0
+            "totalNav": 0.0
         }
     
     try:
@@ -100,7 +100,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 "accounts": [],
                 "positions": [],
                 "trades": [],
-                "total_nav": 0.0
+                "totalNav": 0.0
             }
         
         # Initialize SnapTrade SDK client
@@ -123,7 +123,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 "accounts": [],
                 "positions": [],
                 "trades": [],
-                "total_nav": 0.0
+                "totalNav": 0.0
             }
         
         # Fetch positions and activities for each account
@@ -163,7 +163,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 continue
         
         # Process data
-        total_nav = sum(
+        totalNav = sum(
             safe_float(acc.get("balance", {}).get("total"))
             for acc in accounts
         )
@@ -186,7 +186,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             "accounts": formatted_accounts,
             "positions": all_positions,
             "trades": trades,
-            "total_nav": total_nav
+            "totalNav": totalNav
         }
     
     except Exception as e:
@@ -199,7 +199,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             "accounts": [],
             "positions": [],
             "trades": [],
-            "total_nav": 0.0
+            "totalNav": 0.0
         }
 
 
@@ -238,7 +238,7 @@ async def get_portfolio_data(
             "accounts": [],
             "positions": [],
             "trades": [],
-            "total_nav": 0.0,
+            "totalNav": 0.0,
             "cached": False,
             "cache_age_minutes": 0,
             "last_fetched_at": datetime.now(timezone.utc).isoformat()
