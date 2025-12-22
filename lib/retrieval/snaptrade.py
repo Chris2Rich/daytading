@@ -29,6 +29,58 @@ def safe_float(value) -> float:
     except (TypeError, ValueError):
         return 0.0
 
+def compute_total_nav(
+    positions: list,
+    accounts: list,
+    base_currency: str = "USD"
+) -> float:
+    """
+    Compute total NAV including securities, cash, and FX.
+
+    - Securities: price × quantity
+    - Cash: from account balances
+    - FX: converted when rate available, otherwise skipped
+    """
+
+    total = 0.0
+
+    # 1️⃣ Securities from positions
+    for pos in positions or []:
+        price = safe_float(pos.get("price"))
+        quantity = safe_float(pos.get("fractional_units"))
+
+        if price <= 0 or quantity == 0:
+            continue
+
+        market_value = price * abs(quantity)
+        total += market_value
+
+    # 2️⃣ Cash + FX from account balances
+    for acc in accounts or []:
+        balance = acc.get("balance") or {}
+
+        # Total balance is safest if provided
+        total_balance = safe_float(balance.get("total"))
+        if total_balance > 0:
+            total += total_balance
+            continue
+
+        # Otherwise fall back to cash
+        cash = safe_float(balance.get("cash"))
+        if cash > 0:
+            total += cash
+
+        # FX balances (optional, not always present)
+        fx_balances = balance.get("fx_balances") or []
+        for fx in fx_balances:
+            amount = safe_float(fx.get("amount"))
+            rate = safe_float(fx.get("fx_rate_to_base"))
+
+            if amount > 0 and rate > 0:
+                total += amount * rate
+
+    return round(total, 2)
+
 def format_trades(activities: list) -> list:
     """Filter and format trade activities"""
     if not isinstance(activities, list):
@@ -163,10 +215,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 continue
         
         # Process data
-        totalNav = sum(
-            safe_float(acc.get("balance", {}).get("total"))
-            for acc in accounts
-        )
+        totalNav = compute_total_nav(positions=positions, accounts=accounts)
         trades = format_trades(all_activities)
         
         # Format accounts
