@@ -81,6 +81,19 @@ def compute_total_nav(
 
     return round(total, 2)
 
+def compute_nav(accounts, positions):
+    # Preferred: broker-reported totals
+    total = sum(
+        safe_float(acc.get("balance", {}).get("total"))
+        for acc in accounts or []
+    )
+
+    if total > 0:
+        return round(total, 2)
+
+    # Fallback
+    return compute_total_nav(positions, accounts)
+
 def format_trades(activities: list) -> list:
     """Filter and format trade activities"""
     if not isinstance(activities, list):
@@ -215,7 +228,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 continue
         
         # Process data
-        totalNav = compute_total_nav(positions=positions, accounts=accounts)
+        totalNav = compute_nav(positions=all_positions, accounts=accounts)
         trades = format_trades(all_activities)
         
         # Format accounts
