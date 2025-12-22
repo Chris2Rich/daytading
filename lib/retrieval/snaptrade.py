@@ -246,16 +246,31 @@ async def get_portfolio_data(
             portfolio_data = cached['portfolio_data']
             cache_age_seconds = (datetime.now(timezone.utc) - cached['last_fetched_at']).total_seconds()
             
-            return {
-                **portfolio_data,
-                "cached": True,
-                "cache_age_minutes": round(cache_age_seconds / 60, 1),
-                "last_fetched_at": cached['last_fetched_at'].isoformat()
-            }
+            # FIXED: Add these fields to cached dict instead of unpacking
+            portfolio_data["cached"] = True
+            portfolio_data["cache_age_minutes"] = round(cache_age_seconds / 60, 1)
+            portfolio_data["last_fetched_at"] = cached['last_fetched_at'].isoformat()
+            
+            return portfolio_data
     
     # Cache miss or force refresh - fetch from SnapTrade
     print(f"Fetching fresh portfolio data for user {clerk_user_id}")
     portfolio_data = await fetch_portfolio_from_snaptrade(clerk_user_id)
+    
+    # FIXED: Ensure portfolio_data is a dict
+    if not isinstance(portfolio_data, dict):
+        print(f"ERROR: fetch_portfolio_from_snaptrade returned non-dict: {type(portfolio_data)}")
+        return {
+            "connected": False,
+            "error": "Invalid response from portfolio fetch",
+            "accounts": [],
+            "positions": [],
+            "trades": [],
+            "total_nav": 0.0,
+            "cached": False,
+            "cache_age_minutes": 0,
+            "last_fetched_at": datetime.now(timezone.utc).isoformat()
+        }
     
     # Update cache if successful
     if portfolio_data.get("connected") and not portfolio_data.get("error"):
@@ -274,9 +289,9 @@ async def get_portfolio_data(
     except Exception as e:
         print(f"Failed to update portfolio cache: {e}")
     
-    return {
-        **portfolio_data,
-        "cached": False,
-        "cache_age_minutes": 0,
-        "last_fetched_at": datetime.now(timezone.utc).isoformat()
-    }
+    # FIXED: Add these fields directly instead of unpacking
+    portfolio_data["cached"] = False
+    portfolio_data["cache_age_minutes"] = 0
+    portfolio_data["last_fetched_at"] = datetime.now(timezone.utc).isoformat()
+    
+    return portfolio_data
