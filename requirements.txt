@@ -10,3 +10,4 @@ yfinance
 clerk-backend-api
 asyncpg
 pyjwt[crypto]
+snaptrade-python-sdk

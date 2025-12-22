@@ -1,13 +1,18 @@
 import os
-import httpx
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from clerk_backend_api import Clerk
 
+# Import SnapTrade SDK
+try:
+    from snaptrade_client import SnapTrade
+except ImportError:
+    print("ERROR: snaptrade-python-sdk not installed. Run: pip install snaptrade-python-sdk")
+    SnapTrade = None
+
 # SnapTrade configuration
 SNAPTRADE_CLIENT_ID = os.environ.get("SNAPTRADE_CLIENT_ID")
 SNAPTRADE_SECRET = os.environ.get("SNAPTRADE_SECRET")
-SNAPTRADE_BASE_URL = "https://api.snaptrade.com/api/v1"
 
 if not SNAPTRADE_CLIENT_ID or not SNAPTRADE_SECRET:
     print("Warning: SnapTrade credentials not configured")
@@ -41,13 +46,16 @@ def format_trades(activities: list) -> list:
     for activity in activities:
         activity_type = (activity.get("type") or "").lower()
         if "buy" in activity_type or "sell" in activity_type or "trade" in activity_type:
+            symbol_obj = activity.get("symbol", {})
+            symbol = symbol_obj.get("symbol") if isinstance(symbol_obj, dict) else symbol_obj
+            
             trades.append({
                 "date": activity.get("trade_date") or activity.get("settlement_date") or activity.get("date"),
                 "timestamp": activity.get("trade_date") or activity.get("settlement_date"),
                 "side": activity.get("type"),
                 "type": activity.get("type"),
-                "symbol": (activity.get("symbol") or {}).get("symbol") if isinstance(activity.get("symbol"), dict) else activity.get("symbol"),
-                "ticker": (activity.get("symbol") or {}).get("symbol") if isinstance(activity.get("symbol"), dict) else activity.get("symbol"),
+                "symbol": symbol,
+                "ticker": symbol,
                 "quantity": abs(activity.get("units", 0) or activity.get("quantity", 0)),
                 "qty": abs(activity.get("units", 0) or activity.get("quantity", 0)),
                 "price": activity.get("price", 0),
@@ -63,7 +71,7 @@ def format_trades(activities: list) -> list:
 
 async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
     """
-    Fetch portfolio data from SnapTrade API.
+    Fetch portfolio data from SnapTrade API using the official SDK.
     """
     if not SNAPTRADE_CLIENT_ID or not SNAPTRADE_SECRET:
         return {
@@ -75,12 +83,19 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             "total_nav": 0.0
         }
     
+    if not SnapTrade:
+        return {
+            "connected": False,
+            "error": "SnapTrade SDK not installed",
+            "accounts": [],
+            "positions": [],
+            "trades": [],
+            "total_nav": 0.0
+        }
+    
     try:
-        # Get SnapTrade credentials from Clerk - users.get returns a User object
+        # Get SnapTrade credentials from Clerk
         user_response = clerk.users.get(user_id=clerk_user_id)
-        
-        # The SDK returns a Pydantic model, access private_metadata as an attribute
-        # private_metadata is a dict on the User object
         private_metadata = user_response.private_metadata or {}
         
         snaptrade_user_id = private_metadata.get("snaptradeUserId", clerk_user_id)
@@ -96,102 +111,88 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 "total_nav": 0.0
             }
         
-        # Create HTTP client with SnapTrade auth
-        headers = {
-            "Content-Type": "application/json",
-        }
+        # Initialize SnapTrade SDK client
+        snaptrade = SnapTrade(
+            client_id=SNAPTRADE_CLIENT_ID,
+            consumer_key=SNAPTRADE_SECRET
+        )
         
-        # SnapTrade uses HTTP Basic Auth with clientId:consumerKey
-        auth = (SNAPTRADE_CLIENT_ID, SNAPTRADE_SECRET)
+        # Fetch accounts
+        accounts_resp = snaptrade.account_information.list_user_accounts(
+            user_id=snaptrade_user_id,
+            user_secret=snaptrade_user_secret
+        )
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Fetch accounts
-            accounts_resp = await client.get(
-                f"{SNAPTRADE_BASE_URL}/accounts",
-                params={
-                    "userId": snaptrade_user_id,
-                    "userSecret": snaptrade_user_secret
-                },
-                headers=headers,
-                auth=auth
-            )
-            accounts_resp.raise_for_status()
-            accounts = accounts_resp.json()
-            
-            if not accounts:
-                return {
-                    "connected": True,
-                    "accounts": [],
-                    "positions": [],
-                    "trades": [],
-                    "total_nav": 0.0
-                }
-            
-            # Fetch positions and activities for each account
-            all_positions = []
-            all_activities = []
-            
-            for account in accounts:
-                account_id = account.get("id")
-                
-                try:
-                    # Get positions
-                    positions_resp = await client.get(
-                        f"{SNAPTRADE_BASE_URL}/accounts/{account_id}/positions",
-                        params={
-                            "userId": snaptrade_user_id,
-                            "userSecret": snaptrade_user_secret
-                        },
-                        headers=headers,
-                        auth=auth
-                    )
-                    positions_resp.raise_for_status()
-                    positions = positions_resp.json()
-                    all_positions.extend(positions)
-                    
-                    # Get activities
-                    activities_resp = await client.get(
-                        f"{SNAPTRADE_BASE_URL}/activities",
-                        params={
-                            "userId": snaptrade_user_id,
-                            "userSecret": snaptrade_user_secret,
-                            "accountId": account_id
-                        },
-                        headers=headers,
-                        auth=auth
-                    )
-                    activities_resp.raise_for_status()
-                    activities_data = activities_resp.json()
-                    activities = activities_data if isinstance(activities_data, list) else activities_data.get("data", [])
-                    all_activities.extend(activities)
-                    
-                except httpx.HTTPError as e:
-                    print(f"Error fetching data for account {account_id}: {e}")
-                    continue
-            
-            # Process data
-            total_nav = compute_total_nav_from_positions(all_positions)
-            trades = format_trades(all_activities)
-            
-            # Format accounts
-            formatted_accounts = [
-                {
-                    "id": acc.get("id"),
-                    "name": acc.get("name"),
-                    "accountNumber": acc.get("number"),
-                    "brokerage": acc.get("institution_name") or acc.get("brokerage_name"),
-                    "type": acc.get("type"),
-                }
-                for acc in accounts
-            ]
-            
+        # Extract accounts from response
+        accounts = accounts_resp.body if hasattr(accounts_resp, 'body') else accounts_resp
+        if not accounts:
             return {
                 "connected": True,
-                "accounts": formatted_accounts,
-                "positions": all_positions,
-                "trades": trades,
-                "total_nav": total_nav
+                "accounts": [],
+                "positions": [],
+                "trades": [],
+                "total_nav": 0.0
             }
+        
+        # Fetch positions and activities for each account
+        all_positions = []
+        all_activities = []
+        
+        for account in accounts:
+            account_id = account.get("id")
+            
+            try:
+                # Get positions
+                positions_resp = snaptrade.account_information.get_user_account_positions(
+                    user_id=snaptrade_user_id,
+                    user_secret=snaptrade_user_secret,
+                    account_id=account_id
+                )
+                positions = positions_resp.body if hasattr(positions_resp, 'body') else positions_resp
+                if positions:
+                    all_positions.extend(positions)
+                
+                # Get activities
+                activities_resp = snaptrade.account_information.get_account_activities(
+                    user_id=snaptrade_user_id,
+                    user_secret=snaptrade_user_secret,
+                    account_id=account_id
+                )
+                activities_data = activities_resp.body if hasattr(activities_resp, 'body') else activities_resp
+                
+                # Extract activities list
+                if isinstance(activities_data, list):
+                    all_activities.extend(activities_data)
+                elif isinstance(activities_data, dict) and "data" in activities_data:
+                    all_activities.extend(activities_data["data"])
+                    
+            except Exception as e:
+                print(f"Error fetching data for account {account_id}: {e}")
+                continue
+        
+        # Process data
+        total_nav = compute_total_nav_from_positions(all_positions)
+        trades = format_trades(all_activities)
+        
+        # Format accounts
+        formatted_accounts = [
+            {
+                "id": acc.get("id"),
+                "name": acc.get("name"),
+                "accountNumber": acc.get("number"),
+                "brokerage": acc.get("institution_name") or acc.get("brokerage_name"),
+                "type": acc.get("type"),
+            }
+            for acc in accounts
+        ]
+        
+        return {
+            "connected": True,
+            "accounts": formatted_accounts,
+            "positions": all_positions,
+            "trades": trades,
+            "total_nav": total_nav
+        }
     
     except Exception as e:
         print(f"Error fetching portfolio from SnapTrade: {e}")
@@ -206,33 +207,21 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             "total_nav": 0.0
         }
 
+
 async def get_portfolio_data(
     clerk_user_id: str,
-    db,  # Database instance
+    db,
     force_refresh: bool = False
 ) -> Dict[str, Any]:
-    """
-    Get portfolio data with intelligent caching.
-    
-    Args:
-        clerk_user_id: User's Clerk ID
-        db: Database instance
-        force_refresh: If True, bypass cache and fetch fresh data
-    
-    Returns:
-        Portfolio data dict with cache metadata
-    """
+    """Get portfolio data with intelligent caching."""
     cache_max_age_minutes = 20
     
-    # Check if force refresh requested
     if not force_refresh:
-        # Try to get from cache
         try:
             cached = await db.get_portfolio_cache(clerk_user_id, max_age_minutes=cache_max_age_minutes)
             
             if cached and isinstance(cached.get('portfolio_data'), dict):
-                # Cache hit - return cached data
-                portfolio_data = dict(cached['portfolio_data'])  # Make a copy
+                portfolio_data = dict(cached['portfolio_data'])
                 cache_age_seconds = (datetime.now(timezone.utc) - cached['last_fetched_at']).total_seconds()
                 
                 portfolio_data["cached"] = True
@@ -242,18 +231,15 @@ async def get_portfolio_data(
                 return portfolio_data
         except Exception as e:
             print(f"Cache retrieval error: {e}")
-            # Continue to fetch fresh data
     
-    # Cache miss or force refresh - fetch from SnapTrade
+    # Fetch fresh data
     print(f"Fetching fresh portfolio data for user {clerk_user_id}")
     portfolio_data = await fetch_portfolio_from_snaptrade(clerk_user_id)
     
-    # Validate portfolio_data is a dict
     if not isinstance(portfolio_data, dict):
-        print(f"ERROR: fetch_portfolio_from_snaptrade returned non-dict: {type(portfolio_data)}")
         return {
             "connected": False,
-            "error": "Invalid response from portfolio fetch",
+            "error": "Invalid response",
             "accounts": [],
             "positions": [],
             "trades": [],
@@ -263,22 +249,15 @@ async def get_portfolio_data(
             "last_fetched_at": datetime.now(timezone.utc).isoformat()
         }
     
-    # Update cache if successful
+    # Update cache
     connection_status = "connected" if portfolio_data.get("connected") and not portfolio_data.get("error") else "error" if portfolio_data.get("error") else "disconnected"
     
     try:
-        # Make a copy without cache metadata for storage
         storage_data = {k: v for k, v in portfolio_data.items() if k not in ['cached', 'cache_age_minutes', 'last_fetched_at']}
-        
-        await db.update_portfolio_cache(
-            clerk_user_id,
-            storage_data,
-            connection_status
-        )
+        await db.update_portfolio_cache(clerk_user_id, storage_data, connection_status)
     except Exception as e:
         print(f"Failed to update portfolio cache: {e}")
     
-    # Add cache metadata to response
     portfolio_data["cached"] = False
     portfolio_data["cache_age_minutes"] = 0
     portfolio_data["last_fetched_at"] = datetime.now(timezone.utc).isoformat()
