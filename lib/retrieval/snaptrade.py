@@ -153,7 +153,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                     all_positions.extend(positions)
                 
                 # Get activities
-                activities_resp = snaptrade.account_information.get_account_activities(
+                activities_resp = snaptrade.transactions_and_reporting.get_activities(
                     user_id=snaptrade_user_id,
                     user_secret=snaptrade_user_secret,
                     account_id=account_id
