@@ -138,11 +138,12 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
         all_positions = []
         all_activities = []
         account_ids = [acc["id"] for acc in accounts]
+        accounts_param = ",".join(account_ids)
 
         activities_resp = snaptrade.transactions_and_reporting.get_activities(
             user_id=snaptrade_user_id,
             user_secret=snaptrade_user_secret,
-            accounts=account_ids,
+            accounts=accounts_param,
         )
 
         activities_data = activities_resp.body if hasattr(activities_resp, 'body') else activities_resp
