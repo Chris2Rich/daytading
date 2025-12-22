@@ -2,6 +2,7 @@ import os
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from clerk_backend_api import Clerk
+import math
 
 # Import SnapTrade SDK
 try:
@@ -21,21 +22,12 @@ if not SNAPTRADE_CLIENT_ID or not SNAPTRADE_SECRET:
 CLERK_SECRET_KEY = os.environ.get("CLERK_SECRET_KEY")
 clerk = Clerk(bearer_auth=CLERK_SECRET_KEY)
 
-
-def compute_total_nav_from_positions(positions: list) -> float:
-    """Calculate total NAV from positions"""
-    if not isinstance(positions, list):
+def safe_float(value) -> float:
+    try:
+        f = float(value)
+        return f if math.isfinite(f) else 0.0
+    except (TypeError, ValueError):
         return 0.0
-    
-    total = 0.0
-    for position in positions:
-        price = float(position.get("price", 0))
-        quantity = float(position.get("fractional_units", 0))
-        market_value = price * abs(quantity)
-        total += market_value
-    
-    return total
-
 
 def format_trades(activities: list) -> list:
     """Filter and format trade activities"""
@@ -171,7 +163,10 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 continue
         
         # Process data
-        total_nav = compute_total_nav_from_positions(all_positions)
+        total_nav = sum(
+            safe_float(acc.get("balance", {}).get("total"))
+            for acc in accounts
+        )
         trades = format_trades(all_activities)
         
         # Format accounts
