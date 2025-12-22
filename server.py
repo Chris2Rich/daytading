@@ -23,6 +23,7 @@ from retrieval.yahoofinance import (
     get_fundamentals, 
     get_price_targets
 )
+from retrieval.snaptrade import get_portfolio_data
 
 # Clerk configuration
 CLERK_SECRET_KEY = os.environ.get("CLERK_SECRET_KEY")
@@ -619,6 +620,36 @@ async def handle_ticker_data(request):
             status=500
         )
 
+@require_auth
+async def handle_portfolio_data(request):
+    """
+    GET /data/portfolio
+    
+    Query parameters:
+    - refresh: true|false (default: false) - Force refresh from SnapTrade
+    
+    Returns portfolio data with caching metadata
+    """
+    clerk_user_id = request["clerk_user_id"]
+    
+    try:
+        force_refresh = request.query.get("refresh", "").lower() == "true"
+        
+        portfolio_data = await get_portfolio_data(
+            clerk_user_id=clerk_user_id,
+            db=db,
+            force_refresh=force_refresh
+        )
+        
+        return web.json_response(portfolio_data)
+    
+    except Exception as e:
+        print(f"Error in handle_portfolio_data: {e}")
+        traceback.print_exc()
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
 
 async def handle_health(request):
     """Health check endpoint"""
@@ -673,6 +704,7 @@ def create_app():
     app.router.add_delete("/lm/deletechat", handle_delete_chat)
 
     app.router.add_get("/data/tickerdata", handle_ticker_data)
+    app.router.add_get("/data/portfolio", handle_portfolio_data)
 
     app.router.add_get("/health", handle_health)
     
@@ -709,6 +741,7 @@ async def main():
     print("  GET  /lm/chats")
     print("  GET  /lm/deletechat?chatid=<id>")
     print("  GET  /data/tickerdata")
+    print("  GET  /data/portfolio?refresh=true")
     print("  GET  /health")
     
     # Keep server running

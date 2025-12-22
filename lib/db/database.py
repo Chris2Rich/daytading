@@ -77,6 +77,22 @@ class Database:
                 ON messages(chat_id, sequence_number)
             """)
 
+            # Portfolio cache table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS portfolio_cache (
+                    clerk_user_id TEXT PRIMARY KEY REFERENCES users(clerk_user_id) ON DELETE CASCADE,
+                    portfolio_data JSONB NOT NULL,
+                    last_fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    snaptrade_connection_status TEXT NOT NULL DEFAULT 'connected' 
+                        CHECK (snaptrade_connection_status IN ('connected', 'disconnected', 'error'))
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_portfolio_cache_last_fetched 
+                ON portfolio_cache(clerk_user_id, last_fetched_at DESC)
+            """)
+
     async def ensure_user(self, clerk_user_id: str):
         """Create user if doesn't exist"""
         async with self.pool.acquire() as conn:
@@ -216,3 +232,89 @@ class Database:
                 SET title = $1
                 WHERE chat_id = $2
             """, title, chat_id)
+
+    async def get_portfolio_cache(
+        self, 
+        clerk_user_id: str,
+        max_age_minutes: int = 30
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get cached portfolio data if it exists and is fresh enough.
+        Returns None if cache miss or too old.
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT portfolio_data, last_fetched_at, snaptrade_connection_status
+                FROM portfolio_cache
+                WHERE clerk_user_id = $1
+            """, clerk_user_id)
+            
+            if not row:
+                return None
+            
+            # Check if cache is fresh enough
+            now = datetime.now(timezone.utc)
+            age = now - row['last_fetched_at']
+            
+            if age.total_seconds() > (max_age_minutes * 60):
+                return None  # Too old, needs refresh
+            
+            return {
+                'portfolio_data': row['portfolio_data'],
+                'last_fetched_at': row['last_fetched_at'],
+                'connection_status': row['snaptrade_connection_status']
+            }
+
+    async def update_portfolio_cache(
+        self,
+        clerk_user_id: str,
+        portfolio_data: Dict[str, Any],
+        connection_status: str = 'connected'
+    ):
+        """
+        Update or insert portfolio cache data.
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO portfolio_cache (
+                    clerk_user_id, 
+                    portfolio_data, 
+                    last_fetched_at,
+                    snaptrade_connection_status
+                )
+                VALUES ($1, $2, NOW(), $3)
+                ON CONFLICT (clerk_user_id) 
+                DO UPDATE SET
+                    portfolio_data = EXCLUDED.portfolio_data,
+                    last_fetched_at = NOW(),
+                    snaptrade_connection_status = EXCLUDED.snaptrade_connection_status
+            """, clerk_user_id, json.dumps(portfolio_data), connection_status)
+
+    async def invalidate_portfolio_cache(self, clerk_user_id: str):
+        """
+        Delete portfolio cache for a user (forces refresh on next request).
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                DELETE FROM portfolio_cache
+                WHERE clerk_user_id = $1
+            """, clerk_user_id)
+
+    async def get_portfolio_cache_age(self, clerk_user_id: str) -> Optional[float]:
+        """
+        Get the age of the portfolio cache in seconds.
+        Returns None if no cache exists.
+        """
+        async with self.pool.acquire() as conn:
+            last_fetched = await conn.fetchval("""
+                SELECT last_fetched_at
+                FROM portfolio_cache
+                WHERE clerk_user_id = $1
+            """, clerk_user_id)
+            
+            if not last_fetched:
+                return None
+            
+            now = datetime.now(timezone.utc)
+            age = now - last_fetched
+            return age.total_seconds()
