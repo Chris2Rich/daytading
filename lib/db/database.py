@@ -256,8 +256,6 @@ class Database:
             now = datetime.now(timezone.utc)
             age = now - row['last_fetched_at']
             
-            print(f"Cache last fetched at {row['last_fetched_at']}, now={datetime.now(timezone.utc)}, age={age.total_seconds()}s")
-
             if age.total_seconds() > (max_age_minutes * 60):
                 return None  # Too old, needs refresh
             
