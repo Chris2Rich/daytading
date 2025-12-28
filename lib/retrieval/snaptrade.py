@@ -179,13 +179,14 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             user_secret=snaptrade_user_secret
         )
         
-        authorizations = authorizations_resp.body if hasattr(authorizations_resp, 'body') else authorizations_resp
-        
+        authorizations = authorizations_resp.body if hasattr(authorizations_resp, 'body') else authorizations_resp        
         # Map account IDs to authorization IDs
         account_to_auth = {}
         for auth in authorizations or []:
             auth_id = auth.get("id")
-            for acc in auth.get("brokerage_authorizations", []) or []:
+            # The accounts are directly in the authorization, not nested in "brokerage_authorizations"
+            auth_accounts = auth.get("accounts", [])  # CHANGED: was "brokerage_authorizations"
+            for acc in auth_accounts:
                 account_id = acc.get("id")
                 if account_id:
                     account_to_auth[account_id] = auth_id
