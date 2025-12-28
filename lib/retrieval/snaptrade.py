@@ -208,9 +208,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 if account_institution.lower() == auth_brokerage.lower():
                     account_to_auth[account_id] = auth_id
                     break
-        
-        print(f"DEBUG: Account to auth mapping: {account_to_auth}")
-        
+                
         # Fetch accounts
         accounts_resp = snaptrade.account_information.list_user_accounts(
             user_id=snaptrade_user_id,
