@@ -180,6 +180,11 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
         )
         
         authorizations = authorizations_resp.body if hasattr(authorizations_resp, 'body') else authorizations_resp        
+
+        print(f"DEBUG: Authorizations response: {authorizations}")
+        for auth in authorizations or []:
+            print(f"DEBUG: Single auth: {auth}")
+            print(f"DEBUG: Auth keys: {auth.keys()}")
         # Map account IDs to authorization IDs
         account_to_auth = {}
         for auth in authorizations or []:
