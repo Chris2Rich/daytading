@@ -174,27 +174,42 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             consumer_key=SNAPTRADE_SECRET
         )
 
+        # Fetch authorizations
         authorizations_resp = snaptrade.connections.list_brokerage_authorizations(
             user_id=snaptrade_user_id,
             user_secret=snaptrade_user_secret
         )
         
-        authorizations = authorizations_resp.body if hasattr(authorizations_resp, 'body') else authorizations_resp        
-
-        print(f"DEBUG: Authorizations response: {authorizations}")
-        for auth in authorizations or []:
-            print(f"DEBUG: Single auth: {auth}")
-            print(f"DEBUG: Auth keys: {auth.keys()}")
-        # Map account IDs to authorization IDs
+        authorizations = authorizations_resp.body if hasattr(authorizations_resp, 'body') else authorizations_resp
+        
+        # Fetch accounts
+        accounts_resp = snaptrade.account_information.list_user_accounts(
+            user_id=snaptrade_user_id,
+            user_secret=snaptrade_user_secret
+        )
+        
+        accounts = accounts_resp.body if hasattr(accounts_resp, 'body') else accounts_resp
+        
+        # SIMPLE APPROACH: Map all accounts to their authorization
+        # Since accounts come from list_user_accounts, we need to check which auth they belong to
+        # by looking at the brokerage name/id
         account_to_auth = {}
-        for auth in authorizations or []:
-            auth_id = auth.get("id")
-            # The accounts are directly in the authorization, not nested in "brokerage_authorizations"
-            auth_accounts = auth.get("accounts", [])  # CHANGED: was "brokerage_authorizations"
-            for acc in auth_accounts:
-                account_id = acc.get("id")
-                if account_id:
+        
+        for account in accounts or []:
+            account_id = account.get("id")
+            account_institution = account.get("institution_name") or ""
+            
+            # Match account to authorization by brokerage name
+            for auth in authorizations or []:
+                auth_id = auth.get("id")
+                auth_brokerage = auth.get("brokerage", {}).get("name", "")
+                
+                # If the account's institution matches the authorization's brokerage
+                if account_institution.lower() == auth_brokerage.lower():
                     account_to_auth[account_id] = auth_id
+                    break
+        
+        print(f"DEBUG: Account to auth mapping: {account_to_auth}")
         
         # Fetch accounts
         accounts_resp = snaptrade.account_information.list_user_accounts(
