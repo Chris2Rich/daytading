@@ -469,7 +469,8 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             - Description: Portfolio data is automatically fetched and provided in your context when enabled.
             - When to use: This tool runs automatically - you don't need to call it. When portfolio data is provided in the context, use it to answer questions about the user's holdings, positions, account balances, and trading history.
             - Important: Always reference the provided portfolio data when answering questions about the user's investments. The data includes current positions, account information, recent trades, and total net asset value (NAV).
-            - Do not mention the tool name in your response or mention that you have been "provided" or "given" data. Don't say things like "with the provided data..."
+            - You can mention things like: "According to the linked portfolios..."
+            - If there is no portfolio context, simply say that no portfolio is linked if the request directly relates to the user's specific portfolio data.
             """,
         }
         
