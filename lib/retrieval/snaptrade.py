@@ -173,6 +173,22 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             client_id=SNAPTRADE_CLIENT_ID,
             consumer_key=SNAPTRADE_SECRET
         )
+
+        authorizations_resp = snaptrade.connections.list_brokerage_authorizations(
+            user_id=snaptrade_user_id,
+            user_secret=snaptrade_user_secret
+        )
+        
+        authorizations = authorizations_resp.body if hasattr(authorizations_resp, 'body') else authorizations_resp
+        
+        # Map account IDs to authorization IDs
+        account_to_auth = {}
+        for auth in authorizations or []:
+            auth_id = auth.get("id")
+            for acc in auth.get("brokerage_authorizations", []) or []:
+                account_id = acc.get("id")
+                if account_id:
+                    account_to_auth[account_id] = auth_id
         
         # Fetch accounts
         accounts_resp = snaptrade.account_information.list_user_accounts(
@@ -239,6 +255,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 "accountNumber": acc.get("number"),
                 "brokerage": acc.get("institution_name") or acc.get("brokerage_name"),
                 "type": acc.get("type"),
+                "authorizationId": account_to_auth.get(acc.get("id")),
             }
             for acc in accounts
         ]
