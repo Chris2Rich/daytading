@@ -13,6 +13,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
 from lib.retrieval.search import SearchTool
 from lib.retrieval.marketdata import MarketDataTool
+from lib.retrieval.snaptrade import get_portfolio_data
 
 routers = {
     "OPENROUTER": {
@@ -249,6 +250,7 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         # FIX #1: Add parameters to accept pre-fetched tool results
         search_context: Optional[str] = None,
         market_data_context: Optional[str] = None,
+        portfolio_context: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Stream response with improved context handling.
@@ -294,16 +296,14 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
                     "content": msg.get("content", "")
                 })
             
-            # FIX #1: Remove duplicate tool execution - use passed contexts
-            # No longer fetching tools here, they're passed as parameters
-            
-            # Step 3: Build user message with provided contexts
             final_user_message = user_message
             contexts = []
             if search_context:
                 contexts.append(search_context)
             if market_data_context:
                 contexts.append(market_data_context)
+            if portfolio_context:
+                contexts.append(portfolio_context)
             
             if contexts:
                 final_user_message = "\n\n".join(contexts) + f"\n\nUser Question: {user_message}"
@@ -463,7 +463,14 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             - For financial data, use appropriate precision (typically 2 decimal places)
             - Choose chart types that best represent the data relationship
             - Keep titles concise and descriptive
-            """
+            """,
+            "portfolio": """
+            - Tool Name: `portfolio`
+            - Description: Portfolio data is automatically fetched and provided in your context when enabled.
+            - When to use: This tool runs automatically - you don't need to call it. When portfolio data is provided in the context, use it to answer questions about the user's holdings, positions, account balances, and trading history.
+            - Important: Always reference the provided portfolio data when answering questions about the user's investments. The data includes current positions, account information, recent trades, and total net asset value (NAV).
+            - Do not mention the tool name in your response or mention that you have been "provided" or "given" data. Don't say things like "with the provided data..."
+            """,
         }
         
         base_instructions = f"""You are ZECA, an advanced AI assistant developed by Zecant.
@@ -506,7 +513,9 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
         requested_tools: Optional[List[str]] = None,
         max_tokens: int = 8000,
         max_tool_iterations: int = 5,
-        auto_search: bool = True
+        auto_search: bool = True,
+        clerk_user_id: Optional[str] = None,
+        db = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream response and automatically execute tools if requested by LLM.
@@ -576,6 +585,76 @@ IMPORTANT: Base your response on these search results. Cite sources with [Source
                     "tool": "market_data",
                     "error": str(e)
                 }
+        
+        # Check if portfolio data should be fetched
+        portfolio_context = None
+        if "portfolio" in (requested_tools or []) and clerk_user_id and db:
+            try:
+                
+                portfolio_data = await get_portfolio_data(clerk_user_id, db, force_refresh=False)
+                
+                if portfolio_data.get("connected") and not portfolio_data.get("error"):
+                    # Format portfolio context for LLM
+                    total_nav = portfolio_data.get("totalNav", 0)
+                    accounts = portfolio_data.get("accounts", [])
+                    positions = portfolio_data.get("positions", [])
+                    trades = portfolio_data.get("trades", [])[:10]  # Last 10 trades
+                    
+                    portfolio_context = f"""
+        USER'S PORTFOLIO DATA:
+
+        Total Portfolio Value (NAV): ${total_nav:,.2f}
+
+        Accounts ({len(accounts)} total):
+        """
+                    for acc in accounts:
+                        portfolio_context += f"- {acc.get('name')} ({acc.get('brokerage')}): {acc.get('type')}\n"
+                    
+                    portfolio_context += f"\nPositions ({len(positions)} total):\n"
+                    for pos in positions[:20]:  # Top 20 positions
+                        symbol = pos.get("symbol", {})
+                        ticker = symbol.get("symbol") if isinstance(symbol, dict) else symbol
+                        quantity = pos.get("fractional_units", 0)
+                        price = pos.get("price", 0)
+                        value = price * abs(quantity)
+                        portfolio_context += f"- {ticker}: {quantity:.4f} shares @ ${price:.2f} = ${value:,.2f}\n"
+                    
+                    if trades:
+                        portfolio_context += f"\nRecent Trades ({len(trades)} shown):\n"
+                        for trade in trades:
+                            portfolio_context += f"- {trade.get('date')}: {trade.get('side')} {trade.get('qty')} {trade.get('ticker')} @ ${trade.get('price', 0):.2f}\n"
+                    
+                    portfolio_context += "\nIMPORTANT: Use this portfolio data to answer questions about the user's holdings, positions, and trades."
+                    
+                    # Yield portfolio notification to frontend
+                    yield {
+                        "type": "portfolio_fetched",
+                        "total_nav": total_nav,
+                        "num_positions": len(positions),
+                        "num_accounts": len(accounts)
+                    }
+            except Exception as e:
+                print(f"Portfolio fetch failed: {e}")
+                yield {
+                    "type": "tool_error",
+                    "tool": "portfolio",
+                    "error": str(e)
+                }
+
+        # Pass pre-fetched contexts to streaming function
+        async for token in self.stream_async_with_context(
+            user_message=user_message,
+            chat_history=chat_history,
+            requested_tools=requested_tools,
+            max_tokens=max_tokens,
+            search_context=search_context,
+            market_data_context=market_data_context,
+            portfolio_context=portfolio_context,  # ADD THIS
+        ):
+            yield {
+                "type": "token",
+                "content": token
+            }
         
         # FIX #1: Pass pre-fetched contexts to streaming function
         # This ensures tools are executed only ONCE and contexts are properly injected

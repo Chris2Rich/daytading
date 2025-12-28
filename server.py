@@ -187,7 +187,9 @@ async def handle_generate(request):
                 user_message=message,
                 chat_history=chat_history[:-1],  # Exclude the message we just added
                 requested_tools=tools,
-                auto_search=True  # Enable automatic web search
+                auto_search=True,  # Enable automatic web search
+                clerk_user_id=clerk_user_id,
+                db=db,
             ):
                 if token_data["type"] == "search_performed":
                     # Forward search event to frontend
