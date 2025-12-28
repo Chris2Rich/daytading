@@ -318,3 +318,94 @@ async def get_portfolio_data(
     portfolio_data["last_fetched_at"] = datetime.now(timezone.utc).isoformat()
     
     return portfolio_data
+
+async def remove_broker_authorization(
+    clerk_user_id: str,
+    authorization_id: str,
+    db
+) -> Dict[str, Any]:
+    """
+    Remove a broker authorization from SnapTrade and invalidate cache.
+    
+    Args:
+        clerk_user_id: Clerk user ID
+        authorization_id: SnapTrade authorization ID to remove
+        db: Database instance for cache invalidation
+    
+    Returns:
+        Dict with success status and message
+    """
+    if not SNAPTRADE_CLIENT_ID or not SNAPTRADE_SECRET:
+        return {
+            "success": False,
+            "error": "SnapTrade not configured"
+        }
+    
+    if not SnapTrade:
+        return {
+            "success": False,
+            "error": "SnapTrade SDK not installed"
+        }
+    
+    try:
+        # Get SnapTrade credentials from Clerk
+        user_response = clerk.users.get(user_id=clerk_user_id)
+        private_metadata = user_response.private_metadata or {}
+        
+        snaptrade_user_id = private_metadata.get("snaptradeUserId", clerk_user_id)
+        snaptrade_user_secret = private_metadata.get("snaptradeUserSecret")
+        
+        if not snaptrade_user_secret:
+            return {
+                "success": False,
+                "error": "SnapTrade not connected for this user"
+            }
+        
+        # Initialize SnapTrade SDK client
+        snaptrade = SnapTrade(
+            client_id=SNAPTRADE_CLIENT_ID,
+            consumer_key=SNAPTRADE_SECRET
+        )
+        
+        # Remove the authorization from SnapTrade
+        try:
+            snaptrade.connections.remove_brokerage_authorization(
+                authorization_id=authorization_id,
+                user_id=snaptrade_user_id,
+                user_secret=snaptrade_user_secret
+            )
+        except Exception as snaptrade_error:
+            print(f"SnapTrade authorization removal error: {snaptrade_error}")
+            # Continue to cache invalidation even if SnapTrade call fails
+        
+        # Invalidate portfolio cache
+        await db.invalidate_portfolio_cache(clerk_user_id)
+        
+        # Update Clerk metadata to remove broker from list
+        public_metadata = user_response.public_metadata or {}
+        existing_brokers = public_metadata.get("brokers", [])
+        
+        if isinstance(existing_brokers, list) and authorization_id in existing_brokers:
+            updated_brokers = [b for b in existing_brokers if b != authorization_id]
+            
+            clerk.users.update_metadata(
+                user_id=clerk_user_id,
+                public_metadata={
+                    **public_metadata,
+                    "brokers": updated_brokers
+                }
+            )
+        
+        return {
+            "success": True,
+            "message": f"Broker authorization {authorization_id} removed successfully"
+        }
+    
+    except Exception as e:
+        print(f"Error removing broker authorization: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": str(e)
+        }

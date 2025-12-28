@@ -23,7 +23,7 @@ from retrieval.yahoofinance import (
     get_fundamentals, 
     get_price_targets
 )
-from retrieval.snaptrade import get_portfolio_data
+from retrieval.snaptrade import get_portfolio_data, remove_broker_authorization
 
 # Clerk configuration
 CLERK_SECRET_KEY = os.environ.get("CLERK_SECRET_KEY")
@@ -654,6 +654,56 @@ async def handle_portfolio_data(request):
             status=500
         )
 
+@require_auth
+async def handle_remove_broker(request):
+    """
+    POST /data/broker/remove
+    
+    Request body: {
+        "authorizationId": str
+    }
+    
+    Removes broker authorization from SnapTrade and invalidates cache.
+    """
+    clerk_user_id = request["clerk_user_id"]
+    
+    try:
+        data = await request.json()
+        authorization_id = data.get("authorizationId")
+        
+        if not authorization_id:
+            return web.json_response(
+                {"error": "authorizationId is required"},
+                status=400
+            )
+        
+        result = await remove_broker_authorization(
+            clerk_user_id=clerk_user_id,
+            authorization_id=authorization_id,
+            db=db
+        )
+        
+        if result.get("success"):
+            return web.json_response(result)
+        else:
+            return web.json_response(
+                {"error": result.get("error", "Failed to remove broker")},
+                status=500
+            )
+    
+    except json.JSONDecodeError:
+        return web.json_response(
+            {"error": "Invalid JSON in request body"},
+            status=400
+        )
+    except Exception as e:
+        print(f"Error in handle_remove_broker: {e}")
+        traceback.print_exc()
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
 async def handle_health(request):
     """Health check endpoint"""
     return web.json_response({"status": "ok"})
@@ -708,6 +758,7 @@ def create_app():
 
     app.router.add_get("/data/tickerdata", handle_ticker_data)
     app.router.add_get("/data/portfolio", handle_portfolio_data)
+    app.router.add_post("/data/portfolio/remove", handle_remove_broker)  # ADD THIS
 
     app.router.add_get("/health", handle_health)
     
@@ -745,6 +796,7 @@ async def main():
     print("  GET  /lm/deletechat?chatid=<id>")
     print("  GET  /data/tickerdata")
     print("  GET  /data/portfolio?refresh=true")
+    print("  POST /data/portfolio/remove")
     print("  GET  /health")
     
     # Keep server running
