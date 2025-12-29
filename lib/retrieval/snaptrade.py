@@ -190,33 +190,6 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
         
         accounts = accounts_resp.body if hasattr(accounts_resp, 'body') else accounts_resp
         
-        # SIMPLE APPROACH: Map all accounts to their authorization
-        # Since accounts come from list_user_accounts, we need to check which auth they belong to
-        # by looking at the brokerage name/id
-        account_to_auth = {}
-        
-        for account in accounts or []:
-            account_id = account.get("id")
-            account_institution = account.get("institution_name") or ""
-            
-            # Match account to authorization by brokerage name
-            for auth in authorizations or []:
-                auth_id = auth.get("id")
-                auth_brokerage = auth.get("brokerage", {}).get("name", "")
-                
-                # If the account's institution matches the authorization's brokerage
-                if account_institution.lower() == auth_brokerage.lower():
-                    account_to_auth[account_id] = auth_id
-                    break
-                
-        # Fetch accounts
-        accounts_resp = snaptrade.account_information.list_user_accounts(
-            user_id=snaptrade_user_id,
-            user_secret=snaptrade_user_secret
-        )
-        
-        # Extract accounts from response
-        accounts = accounts_resp.body if hasattr(accounts_resp, 'body') else accounts_resp
         if not accounts:
             return {
                 "connected": True,
@@ -226,23 +199,44 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 "totalNav": 0.0
             }
         
+        # Map accounts to authorizations by brokerage name
+        account_to_auth = {}
+        for account in accounts or []:
+            account_id = account.get("id")
+            account_institution = account.get("institution_name") or ""
+            
+            for auth in authorizations or []:
+                auth_id = auth.get("id")
+                auth_brokerage = auth.get("brokerage", {}).get("name", "")
+                
+                if account_institution.lower() == auth_brokerage.lower():
+                    account_to_auth[account_id] = auth_id
+                    break
+        
         # Fetch positions and activities for each account
         all_positions = []
         all_activities = []
+        total_cash = 0.0
+        total_holdings_value = 0.0
+        
         account_ids = [acc["id"] for acc in accounts]
         accounts_param = ",".join(account_ids)
 
-        activities_resp = snaptrade.transactions_and_reporting.get_activities(
-            user_id=snaptrade_user_id,
-            user_secret=snaptrade_user_secret,
-            accounts=accounts_param,
-        )
+        # Fetch activities
+        try:
+            activities_resp = snaptrade.transactions_and_reporting.get_activities(
+                user_id=snaptrade_user_id,
+                user_secret=snaptrade_user_secret,
+                accounts=accounts_param,
+            )
 
-        activities_data = activities_resp.body if hasattr(activities_resp, 'body') else activities_resp
-        if isinstance(activities_data, list):
-            all_activities.extend(activities_data)
-        elif isinstance(activities_data, dict) and "data" in activities_data:
-            all_activities.extend(activities_data["data"])
+            activities_data = activities_resp.body if hasattr(activities_resp, 'body') else activities_resp
+            if isinstance(activities_data, list):
+                all_activities.extend(activities_data)
+            elif isinstance(activities_data, dict) and "data" in activities_data:
+                all_activities.extend(activities_data["data"])
+        except Exception as e:
+            print(f"Error fetching activities: {e}")
 
         for account in accounts:
             account_id = account.get("id")
@@ -258,12 +252,42 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                 if positions:
                     all_positions.extend(positions)
                     
+                    # Calculate holdings market value
+                    for position in positions:
+                        price = safe_float(position.get("price", 0))
+                        quantity = safe_float(position.get("fractional_units") or position.get("units", 0))
+                        market_value = price * abs(quantity)
+                        total_holdings_value += market_value
+                
+                # Get account balance for cash
+                balance_resp = snaptrade.account_information.get_user_account_balance(
+                    user_id=snaptrade_user_id,
+                    user_secret=snaptrade_user_secret,
+                    account_id=account_id
+                )
+                balance_data = balance_resp.body if hasattr(balance_resp, 'body') else balance_resp
+                
+                # Sum cash from all currencies
+                if isinstance(balance_data, list):
+                    for balance_item in balance_data:
+                        cash = safe_float(balance_item.get("cash", 0))
+                        total_cash += cash
+                    
             except Exception as e:
                 print(f"Error fetching data for account {account_id}: {e}")
                 continue
         
+        # Calculate total NAV = Holdings + Cash
+        # Note: Liabilities would typically be negative cash or margin debt
+        # The balance endpoint already accounts for this in the cash value
+        total_nav = total_holdings_value + total_cash
+        
+        print(f"DEBUG NAV Calculation:")
+        print(f"  Holdings Value: ${total_holdings_value:,.2f}")
+        print(f"  Cash: ${total_cash:,.2f}")
+        print(f"  Total NAV: ${total_nav:,.2f}")
+        
         # Process data
-        totalNav = compute_nav(positions=all_positions, accounts=accounts)
         trades = format_trades(all_activities)
         
         # Format accounts
@@ -284,7 +308,7 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             "accounts": formatted_accounts,
             "positions": all_positions,
             "trades": trades,
-            "totalNav": totalNav
+            "totalNav": round(total_nav, 2)
         }
     
     except Exception as e:
@@ -299,7 +323,6 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
             "trades": [],
             "totalNav": 0.0
         }
-
 
 async def get_portfolio_data(
     clerk_user_id: str,
