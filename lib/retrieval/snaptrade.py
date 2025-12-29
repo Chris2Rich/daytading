@@ -282,11 +282,6 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
         # The balance endpoint already accounts for this in the cash value
         total_nav = total_holdings_value + total_cash
         
-        print(f"DEBUG NAV Calculation:")
-        print(f"  Holdings Value: ${total_holdings_value:,.2f}")
-        print(f"  Cash: ${total_cash:,.2f}")
-        print(f"  Total NAV: ${total_nav:,.2f}")
-        
         # Process data
         trades = format_trades(all_activities)
         
