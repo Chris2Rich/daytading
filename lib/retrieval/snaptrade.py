@@ -94,32 +94,72 @@ def compute_nav(accounts, positions):
     # Fallback
     return compute_total_nav(positions, accounts)
 
-def format_trades(activities: list) -> list:
-    """Filter and format trade activities"""
-    if not isinstance(activities, list):
+def format_orders(orders: list) -> list:
+    """Format order data into standardized trade format"""
+    if not isinstance(orders, list):
         return []
     
     trades = []
-    for activity in activities:
-        activity_type = (activity.get("type") or "").lower()
-        if "buy" in activity_type or "sell" in activity_type or "trade" in activity_type:
-            symbol_obj = activity.get("symbol", {})
-            symbol = symbol_obj.get("symbol") if isinstance(symbol_obj, dict) else symbol_obj
-            
-            trades.append({
-                "date": activity.get("trade_date") or activity.get("settlement_date") or activity.get("date"),
-                "timestamp": activity.get("trade_date") or activity.get("settlement_date"),
-                "side": activity.get("type"),
-                "type": activity.get("type"),
-                "symbol": symbol,
-                "ticker": symbol,
-                "quantity": abs(activity.get("units", 0) or activity.get("quantity", 0)),
-                "qty": abs(activity.get("units", 0) or activity.get("quantity", 0)),
-                "price": activity.get("price", 0),
-                "amount": activity.get("amount", 0),
-                "fee": activity.get("fee", 0),
-                "description": activity.get("description"),
-            })
+    for order in orders:
+        # Skip orders that aren't filled
+        status = (order.get("status") or "").lower()
+        if status not in ["filled", "executed", "partial_fill", "partially_filled"]:
+            continue
+        
+        # Extract symbol information
+        symbol_obj = order.get("symbol", {})
+        if isinstance(symbol_obj, dict):
+            symbol = symbol_obj.get("symbol") or symbol_obj.get("ticker")
+        else:
+            symbol = str(symbol_obj) if symbol_obj else None
+        
+        # Determine order side (buy/sell)
+        action = order.get("action") or order.get("order_type") or ""
+        side = action.upper() if action else "UNKNOWN"
+        
+        # Extract filled quantity and price
+        filled_quantity = abs(
+            safe_float(order.get("filled_units")) or 
+            safe_float(order.get("filled_quantity")) or 
+            safe_float(order.get("units")) or 
+            safe_float(order.get("quantity"))
+        )
+        
+        # Use average fill price if available, otherwise use limit price or price
+        price = (
+            safe_float(order.get("average_fill_price")) or
+            safe_float(order.get("limit_price")) or
+            safe_float(order.get("price"))
+        )
+        
+        # Calculate total amount
+        amount = filled_quantity * price if price > 0 else 0.0
+        
+        # Get timestamp - prefer execution time over order time
+        timestamp = (
+            order.get("execution_date") or 
+            order.get("updated_at") or 
+            order.get("time_placed") or
+            order.get("order_date")
+        )
+        
+        trades.append({
+            "id": order.get("id"),
+            "date": timestamp,
+            "timestamp": timestamp,
+            "side": side,
+            "type": side,
+            "symbol": symbol,
+            "ticker": symbol,
+            "quantity": filled_quantity,
+            "qty": filled_quantity,
+            "price": price,
+            "amount": amount,
+            "fee": safe_float(order.get("commission", 0)),
+            "status": status,
+            "order_type": order.get("order_type"),
+            "time_in_force": order.get("time_in_force"),
+        })
     
     # Sort by date descending
     trades.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
@@ -213,30 +253,11 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                     account_to_auth[account_id] = auth_id
                     break
         
-        # Fetch positions and activities for each account
+        # Fetch positions and orders for each account
         all_positions = []
-        all_activities = []
+        all_orders = []
         total_cash = 0.0
         total_holdings_value = 0.0
-        
-        account_ids = [acc["id"] for acc in accounts]
-        accounts_param = ",".join(account_ids)
-
-        # Fetch activities
-        try:
-            activities_resp = snaptrade.transactions_and_reporting.get_activities(
-                user_id=snaptrade_user_id,
-                user_secret=snaptrade_user_secret,
-                accounts=accounts_param,
-            )
-
-            activities_data = activities_resp.body if hasattr(activities_resp, 'body') else activities_resp
-            if isinstance(activities_data, list):
-                all_activities.extend(activities_data)
-            elif isinstance(activities_data, dict) and "data" in activities_data:
-                all_activities.extend(activities_data["data"])
-        except Exception as e:
-            print(f"Error fetching activities: {e}")
 
         for account in accounts:
             account_id = account.get("id")
@@ -272,18 +293,30 @@ async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
                     for balance_item in balance_data:
                         cash = safe_float(balance_item.get("cash", 0))
                         total_cash += cash
+                
+                # Get account orders
+                try:
+                    orders_resp = snaptrade.account_information.get_user_account_orders(
+                        user_id=snaptrade_user_id,
+                        user_secret=snaptrade_user_secret,
+                        account_id=account_id,
+                        state="all"  # Get all orders regardless of status
+                    )
+                    orders = orders_resp.body if hasattr(orders_resp, 'body') else orders_resp
+                    if orders:
+                        all_orders.extend(orders)
+                except Exception as e:
+                    print(f"Error fetching orders for account {account_id}: {e}")
                     
             except Exception as e:
                 print(f"Error fetching data for account {account_id}: {e}")
                 continue
         
         # Calculate total NAV = Holdings + Cash
-        # Note: Liabilities would typically be negative cash or margin debt
-        # The balance endpoint already accounts for this in the cash value
         total_nav = total_holdings_value + total_cash
         
-        # Process data
-        trades = format_trades(all_activities)
+        # Process orders into trade format
+        trades = format_orders(all_orders)
         
         # Format accounts
         formatted_accounts = [
