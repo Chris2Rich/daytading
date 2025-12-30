@@ -95,76 +95,58 @@ def compute_nav(accounts, positions):
     return compute_total_nav(positions, accounts)
 
 def format_orders(orders: list) -> list:
-    """Format order data into standardized trade format"""
-    if not isinstance(orders, list):
-        return []
-    
     trades = []
-    for order in orders:
-        # Skip orders that aren't filled
+
+    for order in orders or []:
         status = (order.get("status") or "").lower()
-        if status not in ["filled", "executed", "partial_fill", "partially_filled"]:
+        if status not in ["filled", "executed", "partial_fill", "partially_filled", "none"]:
             continue
-        
-        # Extract symbol information
-        symbol_obj = order.get("symbol", {})
-        if isinstance(symbol_obj, dict):
-            symbol = symbol_obj.get("symbol") or symbol_obj.get("ticker")
-        else:
-            symbol = str(symbol_obj) if symbol_obj else None
-        
-        # Determine order side (buy/sell)
-        action = order.get("action") or order.get("order_type") or ""
-        side = action.upper() if action else "UNKNOWN"
-        
-        # Extract filled quantity and price
-        filled_quantity = abs(
-            safe_float(order.get("filled_units")) or 
-            safe_float(order.get("filled_quantity")) or 
-            safe_float(order.get("units")) or 
-            safe_float(order.get("quantity"))
-        )
-        
-        # Use average fill price if available, otherwise use limit price or price
-        price = (
-            safe_float(order.get("average_fill_price")) or
-            safe_float(order.get("limit_price")) or
-            safe_float(order.get("price"))
-        )
-        
-        # Calculate total amount
-        amount = filled_quantity * price if price > 0 else 0.0
-        
-        # Get timestamp - prefer execution time over order time
+
+        # ✅ Ticker
+        symbol = None
+        if isinstance(order.get("universal_symbol"), dict):
+            symbol = order["universal_symbol"].get("symbol")
+
+        # ✅ Quantity
+        filled_qty = safe_float(order.get("filled_quantity"))
+
+        if filled_qty <= 0:
+            continue
+
+        # ✅ Price
+        price = safe_float(order.get("execution_price"))
+
+        # ✅ Amount
+        amount = round(filled_qty * price, 2)
+
+        # ✅ Side
+        side = (order.get("action") or "").upper()
+
+        # ✅ Timestamp
         timestamp = (
-            order.get("execution_date") or 
-            order.get("updated_at") or 
-            order.get("time_placed") or
-            order.get("order_date")
+            order.get("time_executed")
+            or order.get("time_updated")
+            or order.get("time_placed")
         )
-        
+
         trades.append({
-            "id": order.get("id"),
-            "date": timestamp,
-            "timestamp": timestamp,
-            "side": side,
-            "type": side,
-            "symbol": symbol,
+            "id": order.get("brokerage_order_id"),
             "ticker": symbol,
-            "quantity": filled_quantity,
-            "qty": filled_quantity,
-            "price": price,
+            "symbol": symbol,
+            "side": side,
+            "quantity": filled_qty,
+            "qty": filled_qty,
+            "price": round(price, 4),
             "amount": amount,
-            "fee": safe_float(order.get("commission", 0)),
+            "fee": 0.0,  # SnapTrade usually does not return fees
             "status": status,
             "order_type": order.get("order_type"),
             "time_in_force": order.get("time_in_force"),
+            "timestamp": timestamp,
+            "date": timestamp,
         })
-    
-    # Sort by date descending
-    trades.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
-    return trades
 
+    return sorted(trades, key=lambda x: x["timestamp"], reverse=True)
 
 async def fetch_portfolio_from_snaptrade(clerk_user_id: str) -> Dict[str, Any]:
     """
