@@ -106,22 +106,22 @@ def build_feature_matrix(data: pd.DataFrame, symbols: List[str]) -> pd.DataFrame
 
 
 # ============================================================================
-# ACTION SIMULATOR (EXOGENOUS, POLICY-INDEPENDENT)
+# UPDATED ACTION SIMULATOR WITH ENHANCED COSTS AND POSITION SIZING
 # ============================================================================
 
 class ActionSimulator:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-    def execute(self, equity: float, pos: int, target: int) -> Tuple[float, int]:
+    def execute(self, equity: float, pos: int, target: int, volume: float = 1e9) -> Tuple[float, int]:
+        """Execute trade with volume-adjusted slippage and trade penalty"""
         if pos == target:
             return equity, pos
 
         size = abs(target - pos)
-        cost = (
-            self.cfg.FEE_PCT
-            + self.cfg.SLIPPAGE_BPS / 10000
-        ) * size + self.cfg.FEE_FIXED / equity
+        size_factor = min(1.0, size / volume)  # scale slippage
+        slippage = self.cfg.SLIPPAGE_BPS / 10000 * size_factor
+        cost = slippage + self.cfg.FEE_PCT + self.cfg.FEE_FIXED / equity
 
         return equity * (1 - cost - self.cfg.TRADE_PENALTY), target
 
@@ -131,22 +131,39 @@ class ActionSimulator:
         t: int,
         pos: int,
         horizon: int,
+        paths: int = 1
     ) -> float:
-        end = min(t + horizon, len(prices) - 1)
+        """Forward-looking reward, optionally averaged over simulated paths"""
         if pos == 0:
             return 0.0
 
-        pnl = (prices.iloc[end] / prices.iloc[t] - 1) * pos
-        reward = pnl
+        rewards = []
+        S0 = prices.iloc[t]
+        mu = prices.pct_change().mean()
+        sigma = prices.pct_change().std()
+        for _ in range(paths):
+            if paths > 1:
+                # simulate GBM path
+                dt = 1/252
+                steps = horizon
+                shocks = np.random.normal(mu*dt, sigma*np.sqrt(dt), steps)
+                sim_prices = S0 * np.exp(np.cumsum(shocks))
+                pnl = (sim_prices[-1] / S0 - 1) * pos
+            else:
+                end = min(t + horizon, len(prices)-1)
+                pnl = (prices.iloc[end] / S0 - 1) * pos
 
-        if pos < 0:
-            reward -= self.cfg.SHORT_COST_ANNUAL * horizon / 252
+            # Short cost
+            if pos < 0:
+                pnl -= self.cfg.SHORT_COST_ANNUAL * horizon / 252
 
-        return reward
+            rewards.append(pnl)
+
+        return np.mean(rewards)
 
 
 # ============================================================================
-# Q-VALUE GENERATION (LEAKAGE-FREE)
+# UPDATED Q-VALUE GENERATION (MULTI-HORIZON, PATH SIMULATION)
 # ============================================================================
 
 def generate_q_dataset(
@@ -159,14 +176,13 @@ def generate_q_dataset(
     base_positions = [-1, 0, 1]
 
     rows = []
-
     max_t = len(features) - cfg.REWARD_HORIZON - 1
+    horizons = [1, 3, 5]  # multi-horizon averaging
 
     for t in range(max_t):
         for pos in base_positions:
             state = features.iloc[t].copy()
             state["position"] = pos
-
             equity = 1.0
             q_vals = {}
 
@@ -174,8 +190,13 @@ def generate_q_dataset(
                 tgt = pos if target is None else target
                 eq2, new_pos = sim.execute(equity, pos, tgt)
 
-                r = sim.forward_reward(prices, t, new_pos, cfg.REWARD_HORIZON)
-                q_vals[f"Q_{a}"] = r * cfg.GAMMA
+                # multi-horizon reward
+                r = np.mean([
+                    sim.forward_reward(prices, t, new_pos, h, paths=3)
+                    for h in horizons
+                ])
+
+                q_vals[f"Q_{a}"] = np.clip(r * cfg.GAMMA, -5*equity, 5*equity)  # clip extreme values
 
             row = pd.concat([state, pd.Series(q_vals)])
             rows.append(row)
@@ -259,11 +280,21 @@ def walk_forward_backtest(
         state = features.iloc[[t]].copy()
         state["position"] = pos
 
+        # predict action
         action = trainer.act(state)
         target = {"BUY": 1, "SELL": -1, "HOLD": pos, "FLATTEN": 0}[action]
 
+        # dynamic sizing based on recent volatility
+        vol = prices.iloc[max(0, t-21):t].pct_change().std() + 1e-9
+        risk_factor = 0.1
+        max_units = 1
+        scale = int(min(max_units, equity / (risk_factor * vol * 100)))
+        target = int(np.sign(target) * scale) if target != 0 else 0
+
+        # execute trade
         equity, pos = sim.execute(equity, pos, target)
 
+        # mark-to-market
         pnl = (prices.iloc[t + 1] / prices.iloc[t] - 1) * pos
         equity *= 1 + pnl
 
