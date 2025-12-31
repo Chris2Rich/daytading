@@ -6,12 +6,14 @@ from dataclasses import dataclass
 import warnings
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+
 warnings.filterwarnings("ignore")
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
-from lib.retrieval.yfinance import get_trading, get_option, get_option_chain, get_fundamentals
+# Assuming these imports exist in your environment. 
+# If running standalone, replace with standard yfinance
+from lib.retrieval.yahoofinance import get_trading
 
 # ============================================================================
 # CONFIGURATION
@@ -21,47 +23,51 @@ from lib.retrieval.yfinance import get_trading, get_option, get_option_chain, ge
 class Config:
     SYMBOLS: List[str] = None
     INTERVAL: str = "1d"
-    LOOKBACK_DAYS: int = 730
+    LOOKBACK_DAYS: int = 1000
 
     # Costs
-    FEE_FIXED: float = 1.0
-    FEE_PCT: float = 0.001
-    SLIPPAGE_BPS: float = 5.0
+    FEE_PCT: float = 0.001     # 0.1% per trade
+    SLIPPAGE_BPS: float = 5.0  # 5 bps slippage
     SHORT_COST_ANNUAL: float = 0.02
-    TRADE_PENALTY: float = 0.002
+    
+    # Risk / Sizing
+    TARGET_VOL: float = 0.15   # 15% Annualized Vol target
+    MAX_UNITS: int = 5         # Max leverage/units (allows scaling)
 
-    # RL
-    REWARD_HORIZON: int = 5
-    GAMMA: float = 0.97
+    # RL / Simulation
+    REWARD_HORIZON: int = 5    # Days to look forward
+    GAMMA: float = 0.90        # Discount factor
+    NUM_PATHS: int = 10        # Number of Monte Carlo paths for reward estimation
 
     # Model
-    MAX_DEPTH: int = 5
-    NUM_LEAVES: int = 20
+    MAX_DEPTH: int = 4
+    NUM_LEAVES: int = 15
     LEARNING_RATE: float = 0.05
-    NUM_ROUNDS: int = 300
+    NUM_ROUNDS: int = 200
 
     # Backtest
     MIN_TRAIN_DAYS: int = 252
-    RETRAIN_FREQ: int = 21
-
+    RETRAIN_FREQ: int = 63     # Retrain quarterly-ish
 
 # ============================================================================
 # DATA
 # ============================================================================
 
 def load_data(symbols: list, days: int, interval: str) -> pd.DataFrame:
-    """Load OHLCV for multiple symbols using custom yfinance wrapper."""
-    
+    """Load OHLCV for multiple symbols."""
     print(f"📊 Loading data: {symbols}")
     dfs = []
     for sym in symbols:
-        data = get_trading(sym, days=days, interval=interval)
-        if data.empty:
+        try:
+            # Using the imported library wrapper
+            data = get_trading(sym, days=days, interval=interval)
+            if data.empty:
+                continue
+            data.columns = pd.MultiIndex.from_product([[sym], data.columns])
+            dfs.append(data)
+        except Exception as e:
+            print(f"Error loading {sym}: {e}")
             continue
-        
-        # Make MultiIndex for symbol
-        data.columns = pd.MultiIndex.from_product([[sym], data.columns])
-        dfs.append(data)
     
     if not dfs:
         return pd.DataFrame()
@@ -70,9 +76,8 @@ def load_data(symbols: list, days: int, interval: str) -> pd.DataFrame:
     print(f"✓ Loaded {len(combined)} rows")
     return combined
 
-
 # ============================================================================
-# FEATURE ENGINEERING (UNCHANGED, CAUSAL)
+# FEATURE ENGINEERING
 # ============================================================================
 
 def engineer_features(data: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -82,171 +87,234 @@ def engineer_features(data: pd.DataFrame, symbol: str) -> pd.DataFrame:
     low = data[(symbol, "Low")]
     volume = data[(symbol, "Volume")]
 
-    for lag in [1, 2, 3, 5, 10, 21, 42]:
+    # 1. Returns
+    for lag in [1, 3, 5, 10, 21]:
         df[f"ret_{lag}"] = close.pct_change(lag)
 
-    for w in [5, 10, 21, 42]:
-        df[f"vol_{w}"] = close.pct_change().rolling(w).std()
+    # 2. Volatility (Annualized)
+    for w in [10, 21, 63]:
+        df[f"vol_{w}"] = close.pct_change().rolling(w).std() * np.sqrt(252)
 
-    for w in [10, 21, 50, 100]:
+    # 3. Trends (Distance from SMA)
+    for w in [21, 50, 200]:
         sma = close.rolling(w).mean()
-        df[f"sma_{w}"] = sma
-        df[f"price_sma_{w}"] = close / sma - 1
+        df[f"dist_sma_{w}"] = (close / sma) - 1
 
+    # 4. Relative Volume
+    df["rel_vol"] = volume / (volume.rolling(21).mean() + 1e-9)
+
+    # 5. Range
     df["range"] = (high - low) / close
-    df["rel_vol"] = volume / volume.rolling(21).mean()
 
+    # Prefix columns
     df.columns = [f"{symbol}_{c}" for c in df.columns]
     return df
-
 
 def build_feature_matrix(data: pd.DataFrame, symbols: List[str]) -> pd.DataFrame:
     feats = [engineer_features(data, s) for s in symbols]
     return pd.concat(feats, axis=1).dropna()
 
+# ============================================================================
+# PRE-CALCULATION HELPERS
+# ============================================================================
+
+def calculate_rolling_stats(prices: pd.Series, window: int = 252) -> pd.DataFrame:
+    """
+    Pre-calculate Log Return Mean and Std Dev to avoid lookahead bias 
+    and redundant computation during simulation.
+    """
+    # Use Log Returns for geometric Brownian motion
+    log_rets = np.log(prices / prices.shift(1))
+    
+    stats = pd.DataFrame(index=prices.index)
+    stats['mu'] = log_rets.rolling(window).mean()
+    stats['sigma'] = log_rets.rolling(window).std()
+    return stats
 
 # ============================================================================
-# UPDATED ACTION SIMULATOR WITH ENHANCED COSTS AND POSITION SIZING
+# SIMULATION ENGINE
 # ============================================================================
 
 class ActionSimulator:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-    def execute(self, equity: float, pos: int, target: int, volume: float = 1e9) -> Tuple[float, int]:
-        """Execute trade with volume-adjusted slippage and trade penalty"""
-        if pos == target:
-            return equity, pos
+    def execute(self, equity: float, current_pos_units: int, target_pos_units: int, price: float) -> Tuple[float, int]:
+        """
+        Execute trade with REALISTIC cost model.
+        Returns: (new_equity, new_position_units)
+        """
+        if current_pos_units == target_pos_units:
+            return equity, current_pos_units
 
-        size = abs(target - pos)
-        size_factor = min(1.0, size / volume)  # scale slippage
-        slippage = self.cfg.SLIPPAGE_BPS / 10000 * size_factor
-        cost = slippage + self.cfg.FEE_PCT + self.cfg.FEE_FIXED / equity
+        # Turnover in units
+        units_traded = abs(target_pos_units - current_pos_units)
+        
+        # Dollar value traded
+        traded_value = units_traded * price
+        
+        # Costs
+        slippage_cost = traded_value * (self.cfg.SLIPPAGE_BPS / 10000)
+        fee_cost = traded_value * self.cfg.FEE_PCT
+        
+        total_cost = slippage_cost + fee_cost
+        
+        new_equity = equity - total_cost
+        return new_equity, target_pos_units
 
-        return equity * (1 - cost - self.cfg.TRADE_PENALTY), target
-
-    def forward_reward(
+    def monte_carlo_reward(
         self,
-        prices: pd.Series,
-        t: int,
-        pos: int,
+        price_now: float,
+        mu: float,
+        sigma: float,
+        pos_units: int,
         horizon: int,
-        paths: int = 1
+        paths: int
     ) -> float:
-        """Forward-looking reward, optionally averaged over simulated paths"""
-        if pos == 0:
+        """
+        Correct Geometric Brownian Motion (GBM) simulation.
+        Formula: S_t = S_0 * exp( (mu - 0.5*sigma^2)*t + sigma*W_t )
+        """
+        if pos_units == 0:
             return 0.0
 
-        rewards = []
-        S0 = prices.iloc[t]
-        mu = prices.pct_change().mean()
-        sigma = prices.pct_change().std()
-        for _ in range(paths):
-            if paths > 1:
-                # simulate GBM path
-                dt = 1/252
-                steps = horizon
-                shocks = np.random.normal(mu*dt, sigma*np.sqrt(dt), steps)
-                sim_prices = S0 * np.exp(np.cumsum(shocks))
-                pnl = (sim_prices[-1] / S0 - 1) * pos
-            else:
-                end = min(t + horizon, len(prices)-1)
-                pnl = (prices.iloc[end] / S0 - 1) * pos
+        dt = 1/252
+        
+        # Drift adjustment for variance drag (Jensen's Inequality)
+        drift = (mu - 0.5 * sigma**2) * dt
+        
+        # Simulation
+        # shape: (paths, horizon)
+        shocks = np.random.normal(0, 1, (paths, horizon))
+        
+        # path evolution (cumulative sum of log returns)
+        log_ret_paths = np.cumsum(drift + sigma * np.sqrt(dt) * shocks, axis=1)
+        
+        # Price paths
+        price_paths = price_now * np.exp(log_ret_paths)
+        
+        # Final prices at horizon
+        final_prices = price_paths[:, -1]
+        
+        # PnL Calculation
+        # PnL = Units * (Price_Final - Price_Start)
+        pnl = pos_units * (final_prices - price_now)
+        
+        # Subtract Short Borrow Costs if short
+        if pos_units < 0:
+            borrow_cost = abs(pos_units * price_now) * (self.cfg.SHORT_COST_ANNUAL * horizon / 252)
+            pnl -= borrow_cost
 
-            # Short cost
-            if pos < 0:
-                pnl -= self.cfg.SHORT_COST_ANNUAL * horizon / 252
-
-            rewards.append(pnl)
-
-        return np.mean(rewards)
-
+        # Return expected PnL
+        return np.mean(pnl)
 
 # ============================================================================
-# UPDATED Q-VALUE GENERATION (MULTI-HORIZON, PATH SIMULATION)
+# DATASET GENERATION
 # ============================================================================
 
-def generate_q_dataset(
+def generate_training_data(
     features: pd.DataFrame,
     prices: pd.Series,
+    rolling_stats: pd.DataFrame,
     cfg: Config,
 ) -> pd.DataFrame:
+    
     sim = ActionSimulator(cfg)
-    actions = {"BUY": 1, "SELL": -1, "HOLD": None, "FLATTEN": 0}
-    base_positions = [-1, 0, 1]
-
+    
+    # Target Actions: 1 (Long), 0 (Neutral), -1 (Short)
+    # These represent the TARGET STATE, not the order type.
+    target_states = [1, 0, -1] 
+    
     rows = []
-    max_t = len(features) - cfg.REWARD_HORIZON - 1
-    horizons = [1, 3, 5]  # multi-horizon averaging
+    # Ensure we don't go off the end
+    valid_indices = features.index[:-cfg.REWARD_HORIZON]
+    
+    print("  > Generating Monte Carlo rewards...")
+    
+    for t in range(0, len(valid_indices), 1): # Step 1 for full data
+        timestamp = valid_indices[t]
+        
+        # Current Market State
+        current_price = prices.loc[timestamp]
+        mu = rolling_stats.loc[timestamp, 'mu']
+        sigma = rolling_stats.loc[timestamp, 'sigma']
+        
+        if pd.isna(mu) or pd.isna(sigma):
+            continue
 
-    for t in range(max_t):
-        for pos in base_positions:
-            state = features.iloc[t].copy()
-            state["position"] = pos
-            equity = 1.0
-            q_vals = {}
+        # Feature vector
+        state_features = features.loc[timestamp].copy()
+        
+        # For each possible TARGET state (Long, Neutral, Short)
+        q_values = {}
+        
+        # We assume a fixed hypothetical position size for training labels 
+        # (e.g., 1 unit) to normalize the regression target.
+        unit_size = 1000 / current_price # Standardize to $1000 exposure
 
-            for a, target in actions.items():
-                tgt = pos if target is None else target
-                eq2, new_pos = sim.execute(equity, pos, tgt)
+        for target_dir in target_states:
+            # Calculate Expected Value (Q) of being in this state
+            # Note: We are doing "Horizon Regression" here. 
+            # We estimate the expected reward of holding this state for H days.
+            
+            ev = sim.monte_carlo_reward(
+                price_now=current_price,
+                mu=mu,
+                sigma=sigma,
+                pos_units=target_dir * unit_size,
+                horizon=cfg.REWARD_HORIZON,
+                paths=cfg.NUM_PATHS
+            )
+            
+            # Discounted Reward
+            q_values[f"Q_{target_dir}"] = ev * cfg.GAMMA
 
-                # multi-horizon reward
-                r = np.mean([
-                    sim.forward_reward(prices, t, new_pos, h, paths=3)
-                    for h in horizons
-                ])
-
-                q_vals[f"Q_{a}"] = np.clip(r * cfg.GAMMA, -5*equity, 5*equity)  # clip extreme values
-
-            row = pd.concat([state, pd.Series(q_vals)])
-            rows.append(row)
+        # Combine features + targets
+        row = pd.concat([state_features, pd.Series(q_values)])
+        rows.append(row)
 
     return pd.DataFrame(rows).dropna()
 
-
 # ============================================================================
-# MODEL TRAINER
+# MODEL
 # ============================================================================
 
-class QModelTrainer:
+class PolicyModel:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.models = {}
         self.features = None
+        self.targets = ["Q_1", "Q_0", "Q_-1"]
 
     def train(self, data: pd.DataFrame):
-        actions = ["BUY", "SELL", "HOLD", "FLATTEN"]
-        q_cols = [f"Q_{a}" for a in actions]
-        self.features = [c for c in data.columns if c not in q_cols]
-
+        self.features = [c for c in data.columns if c not in self.targets]
         X = data[self.features]
 
-        for a in actions:
-            y = data[f"Q_{a}"]
+        params = {
+            "objective": "regression_l2", # L2 regression is robust for noisy financial data
+            "max_depth": self.cfg.MAX_DEPTH,
+            "num_leaves": self.cfg.NUM_LEAVES,
+            "learning_rate": self.cfg.LEARNING_RATE,
+            "feature_fraction": 0.8,
+            "bagging_fraction": 0.7,
+            "bagging_freq": 1,
+            "verbosity": -1,
+            "seed": 42
+        }
+
+        for tgt in self.targets:
+            y = data[tgt]
             ds = lgb.Dataset(X, y)
+            self.models[tgt] = lgb.train(params, ds, num_boost_round=self.cfg.NUM_ROUNDS)
 
-            params = {
-                "objective": "regression",
-                "max_depth": self.cfg.MAX_DEPTH,
-                "num_leaves": self.cfg.NUM_LEAVES,
-                "learning_rate": self.cfg.LEARNING_RATE,
-                "feature_fraction": 0.8,
-                "bagging_fraction": 0.8,
-                "seed": 42,
-                "verbosity": -1,
-            }
-
-            self.models[a] = lgb.train(
-                params,
-                ds,
-                num_boost_round=self.cfg.NUM_ROUNDS,
-            )
-
-    def act(self, state: pd.DataFrame) -> str:
+    def predict_action(self, state: pd.DataFrame) -> int:
+        """Returns the optimal target direction (1, 0, -1)"""
         X = state[self.features]
-        q = {a: self.models[a].predict(X)[0] for a in self.models}
-        return max(q, key=q.get)
-
+        preds = {int(k.split("_")[1]): self.models[k].predict(X)[0] for k in self.models}
+        
+        # Select key with max value
+        best_action = max(preds, key=preds.get)
+        return best_action
 
 # ============================================================================
 # WALK-FORWARD BACKTEST
@@ -257,55 +325,87 @@ def walk_forward_backtest(
     prices: pd.Series,
     cfg: Config,
 ) -> Dict:
+    
+    # Pre-calculate rolling GBM stats to avoid loop overhead
+    rolling_stats = calculate_rolling_stats(prices, window=252)
 
-    equity = 100.0
-    pos = 0
-    equities = [equity]
-    positions = [pos]
-
-    trainer = None
+    equity = 10000.0
+    current_units = 0
+    
+    history_eq = [equity]
+    history_pos = [current_units]
+    
+    model = None
     sim = ActionSimulator(cfg)
 
-    for t in range(cfg.MIN_TRAIN_DAYS, len(features) - 1):
+    # Convert index to integer location for slicing
+    timestamps = features.index
+    
+    print(f"🚀 Starting Walk-Forward Backtest ({len(timestamps)} steps)...")
 
+    for t in range(cfg.MIN_TRAIN_DAYS, len(timestamps) - 1):
+        
+        curr_time = timestamps[t]
+        next_time = timestamps[t+1]
+        
+        # 1. Retrain Logic
         if (t - cfg.MIN_TRAIN_DAYS) % cfg.RETRAIN_FREQ == 0:
-            train_data = generate_q_dataset(
-                features.iloc[:t],
-                prices.iloc[:t],
-                cfg,
-            )
-            trainer = QModelTrainer(cfg)
-            trainer.train(train_data)
+            print(f"  [Date: {curr_time.date()}] Retraining model...")
+            
+            # Slice history for training
+            train_feats = features.iloc[:t]
+            train_prices = prices.iloc[:t]
+            train_stats = rolling_stats.iloc[:t]
+            
+            train_data = generate_training_data(train_feats, train_prices, train_stats, cfg)
+            
+            model = PolicyModel(cfg)
+            model.train(train_data)
 
-        state = features.iloc[[t]].copy()
-        state["position"] = pos
+        # 2. Get State & Action
+        state = features.iloc[[t]]
+        
+        # If model hasn't trained yet (shouldn't happen with logic above), hold
+        if model is None:
+            target_dir = 0
+        else:
+            target_dir = model.predict_action(state)
 
-        # predict action
-        action = trainer.act(state)
-        target = {"BUY": 1, "SELL": -1, "HOLD": pos, "FLATTEN": 0}[action]
+        # 3. Dynamic Position Sizing (Volatility Targeting)
+        # Volatility of the asset
+        current_vol = rolling_stats.loc[curr_time, 'sigma'] * np.sqrt(252)
+        
+        # Avoid division by zero
+        current_vol = max(current_vol, 0.05) 
+        
+        # Target Exposure ($) = Equity * (Target Vol / Asset Vol)
+        # "Kelly-lite" approach
+        target_exposure = equity * (cfg.TARGET_VOL / current_vol)
+        
+        # Cap leverage
+        max_exposure = equity * cfg.MAX_UNITS
+        target_exposure = min(target_exposure, max_exposure)
+        
+        # Calculate Target Units
+        price = prices.loc[curr_time]
+        ideal_units = int(target_exposure / price) * target_dir
+        
+        # 4. Execute Trade
+        equity, current_units = sim.execute(equity, current_units, ideal_units, price)
 
-        # dynamic sizing based on recent volatility
-        vol = prices.iloc[max(0, t-21):t].pct_change().std() + 1e-9
-        risk_factor = 0.1
-        max_units = 1
-        scale = int(min(max_units, equity / (risk_factor * vol * 100)))
-        target = int(np.sign(target) * scale) if target != 0 else 0
-
-        # execute trade
-        equity, pos = sim.execute(equity, pos, target)
-
-        # mark-to-market
-        pnl = (prices.iloc[t + 1] / prices.iloc[t] - 1) * pos
-        equity *= 1 + pnl
-
-        equities.append(equity)
-        positions.append(pos)
+        # 5. Mark to Market (Step forward)
+        next_price = prices.loc[next_time]
+        pnl = current_units * (next_price - price)
+        equity += pnl
+        
+        history_eq.append(equity)
+        history_pos.append(current_units)
 
     return {
-        "equity": equities,
-        "positions": positions,
+        "equity": history_eq,
+        "positions": history_pos,
+        "dates": timestamps[cfg.MIN_TRAIN_DAYS:]
     }
-
 
 # ============================================================================
 # MAIN
@@ -313,14 +413,31 @@ def walk_forward_backtest(
 
 def main():
     cfg = Config(SYMBOLS=["SPY"])
-
+    
+    # 1. Load Data
     data = load_data(cfg.SYMBOLS, cfg.LOOKBACK_DAYS, cfg.INTERVAL)
+    if data.empty:
+        print("No data loaded.")
+        return
+
     features = build_feature_matrix(data, cfg.SYMBOLS)
+    
+    # Align prices to features (drop NAs created by lags)
+    features = features.dropna()
     prices = data[(cfg.SYMBOLS[0], "Close")].loc[features.index]
 
+    # 2. Run Backtest
     results = walk_forward_backtest(features, prices, cfg)
-    print(f"Final equity: {results['equity'][-1]:.2f}")
 
+    # 3. Report
+    final_eq = results['equity'][-1]
+    start_eq = results['equity'][0]
+    ret = (final_eq / start_eq) - 1
+    
+    print("-" * 50)
+    print(f"Final Equity: ${final_eq:,.2f}")
+    print(f"Total Return: {ret*100:.2f}%")
+    print("-" * 50)
 
 if __name__ == "__main__":
     main()
