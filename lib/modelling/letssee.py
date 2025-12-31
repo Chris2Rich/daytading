@@ -131,35 +131,26 @@ class ActionSimulator:
         t: int,
         pos: int,
         horizon: int,
-        paths: int = 1
+        paths: int = 1  # Kept arg for compatibility, but unused logic removed
     ) -> float:
-        """Forward-looking reward, optionally averaged over simulated paths"""
+        """Forward-looking reward using REALIZED future prices (No Randomness)"""
         if pos == 0:
             return 0.0
 
-        rewards = []
+        # REMOVED: Random GBM simulation and 'mu' calculation (Drift Leakage)
+        # We now strictly use the real future price to train.
+        
         S0 = prices.iloc[t]
-        mu = prices.pct_change().mean()
-        sigma = prices.pct_change().std()
-        for _ in range(paths):
-            if paths > 1:
-                # simulate GBM path
-                dt = 1/252
-                steps = horizon
-                shocks = np.random.normal(mu*dt, sigma*np.sqrt(dt), steps)
-                sim_prices = S0 * np.exp(np.cumsum(shocks))
-                pnl = (sim_prices[-1] / S0 - 1) * pos
-            else:
-                end = min(t + horizon, len(prices)-1)
-                pnl = (prices.iloc[end] / S0 - 1) * pos
+        end = min(t + horizon, len(prices)-1)
+        
+        # Calculate PnL based on real future outcome
+        pnl = (prices.iloc[end] / S0 - 1) * pos
 
-            # Short cost
-            if pos < 0:
-                pnl -= self.cfg.SHORT_COST_ANNUAL * horizon / 252
+        # Short cost
+        if pos < 0:
+            pnl -= self.cfg.SHORT_COST_ANNUAL * horizon / 252
 
-            rewards.append(pnl)
-
-        return np.mean(rewards)
+        return pnl
 
 
 # ============================================================================
@@ -190,9 +181,9 @@ def generate_q_dataset(
                 tgt = pos if target is None else target
                 eq2, new_pos = sim.execute(equity, pos, tgt)
 
-                # multi-horizon reward
+                # CHANGED: paths=1. We must learn from the ONE real market history.
                 r = np.mean([
-                    sim.forward_reward(prices, t, new_pos, h, paths=3)
+                    sim.forward_reward(prices, t, new_pos, h, paths=1)
                     for h in horizons
                 ])
 
@@ -219,11 +210,20 @@ class QModelTrainer:
         q_cols = [f"Q_{a}" for a in actions]
         self.features = [c for c in data.columns if c not in q_cols]
 
-        X = data[self.features]
+        # CHANGED: Time-series split for Validation to prevent Overfitting
+        split_idx = int(len(data) * 0.9)
+        train_data = data.iloc[:split_idx]
+        val_data = data.iloc[split_idx:]
+
+        X_train = train_data[self.features]
+        X_val = val_data[self.features]
 
         for a in actions:
-            y = data[f"Q_{a}"]
-            ds = lgb.Dataset(X, y)
+            y_train = train_data[f"Q_{a}"]
+            y_val = val_data[f"Q_{a}"]
+            
+            ds_train = lgb.Dataset(X_train, y_train)
+            ds_val = lgb.Dataset(X_val, y_val, reference=ds_train)
 
             params = {
                 "objective": "regression",
@@ -234,12 +234,19 @@ class QModelTrainer:
                 "bagging_fraction": 0.8,
                 "seed": 42,
                 "verbosity": -1,
+                "metric": "mse" 
             }
 
+            # CHANGED: Added callbacks/early stopping
             self.models[a] = lgb.train(
                 params,
-                ds,
+                ds_train,
+                valid_sets=[ds_train, ds_val],
                 num_boost_round=self.cfg.NUM_ROUNDS,
+                callbacks=[
+                    lgb.early_stopping(stopping_rounds=50, verbose=False),
+                    lgb.log_evaluation(period=0) # Squelch logs
+                ]
             )
 
     def act(self, state: pd.DataFrame) -> str:
