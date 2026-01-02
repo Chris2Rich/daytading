@@ -28,8 +28,8 @@ class Config:
     
     # Costs
     FEE_FIXED: float = 1.0
-    FEE_PCT: float = 0.001
-    SLIPPAGE_BPS: float = 5.0
+    FEE_PCT: float = 0.00051
+    SLIPPAGE_BPS: float = 2.0
     SHORT_COST_ANNUAL: float = 0.02
     TRADE_PENALTY: float = 0.002
 
@@ -38,7 +38,7 @@ class Config:
     RETRAIN_FREQ: int = 21
     
     # Model ensemble
-    NUM_MODELS: int = 5        # Reduced for faster training
+    NUM_MODELS: int = 50        # Reduced for faster training
     MAX_DEPTH: int = 3
     NUM_LEAVES: int = 4
     LEARNING_RATE: float = 0.01
@@ -350,7 +350,7 @@ class ActionSimulator:
         """Execute an action and return new equity and position."""
         
         if action == "HOLD":
-            return equity, current_position
+            target_position = current_position
         
         elif action == "FLATTEN":
             target_position = 0.0
@@ -358,26 +358,32 @@ class ActionSimulator:
         elif action == "BUY":
             vol_scale = np.clip(0.02 / (volatility + 1e-9), 0.1, 2.0)
             target_position = confidence * vol_scale
-            target_position = np.clip(target_position, 0.0, 0.99)
+            target_position = np.clip(target_position, 1e-9, 1 - 1e-9)
         
         elif action == "SELL":
             vol_scale = np.clip(0.02 / (volatility + 1e-9), 0.1, 2.0)
             target_position = -confidence * vol_scale
-            target_position = np.clip(target_position, -0.99, 0.0)
+            target_position = np.clip(target_position, -1 + 1e-9, -1e-9)
         
         else:
             raise ValueError(f"Unknown action: {action}")
         
         # Calculate trade cost
-        trade_size = abs(target_position - current_position)
-        if trade_size > 0.01:
-            slippage = self.cfg.SLIPPAGE_BPS / 10000 * trade_size
-            fees = self.cfg.FEE_PCT * trade_size + self.cfg.FEE_FIXED / equity
-            penalty = self.cfg.TRADE_PENALTY * trade_size
-            total_cost = slippage + fees + penalty
-            equity *= (1 - total_cost)
+        trade_size_pct = abs(target_position - current_position)
+        cost_amount = 0.0
         
-        return equity, target_position
+        if trade_size_pct > 0.001: # Filter tiny noise trades
+            # Calculate cost in percentage of equity
+            slippage = (self.cfg.SLIPPAGE_BPS / 10000) * trade_size_pct
+            fees = (self.cfg.FEE_PCT * trade_size_pct) + (self.cfg.FEE_FIXED / equity)
+            penalty = self.cfg.TRADE_PENALTY * trade_size_pct
+            
+            total_cost_pct = slippage + fees + penalty
+            cost_amount = total_cost_pct
+            
+            equity *= (1.0 - total_cost_pct)
+        
+        return equity, target_position, cost_amount
 
 
 # ============================================================================
@@ -533,12 +539,16 @@ class EnsembleQModel:
         
         best_action = max(ucb_values, key=ucb_values.get)
         
-        # Confidence based on Q-value
+        # Confidence based on Q-value spread
         q_range = max(q_values.values()) - min(q_values.values())
-        confidence = np.clip(
-            (q_values[best_action] - min(q_values.values())) / (q_range + 1e-9),
-            0.0, 1.0
-        )
+        
+        if q_range < 1e-6:
+            confidence = 0.5
+        else:
+            confidence = np.clip(
+                (q_values[best_action] - min(q_values.values())) / (q_range + 1e-9),
+                0.1, 1.0  # FIX: Set minimum confidence to 0.1
+            )
         
         return best_action, confidence
 
@@ -555,7 +565,7 @@ def walk_forward_backtest(
     """Walk-forward backtest with NO forward-looking bias."""
     
     symbols = list(prices.keys())
-    equity = 100.0
+    equity = 100000.0
     positions = {s: 0.0 for s in symbols}
     
     # History tracking
@@ -580,8 +590,13 @@ def walk_forward_backtest(
     print(f"\n🚀 Starting backtest from t={min_t} to t={len(features)-1}")
     print(f"   Initial equity: ${equity:.2f}\n")
     
+    total_fees_paid = 0.0
+
     for t in range(min_t, len(features) - 1):
         
+        if equity <= 0:
+            print(f"💀 BANKRUPT at t={t}")
+            break
         # === RETRAIN MODELS ===
         if (t - min_t) % cfg.RETRAIN_FREQ == 0:
             print(f"🔄 Retraining at t={t} ({features.index[t].date()})")
@@ -600,7 +615,9 @@ def walk_forward_backtest(
         
         # === PREDICT ACTIONS FOR EACH SYMBOL ===
         raw_positions = {}
-        
+        chosen_actions = {}
+        step_costs = {}
+
         for symbol in symbols:
             # Get state features
             state_cols = [c for c in features.columns if c.startswith(f"{symbol}_")]
@@ -612,9 +629,17 @@ def walk_forward_backtest(
             volatility = recent_returns.std() if len(recent_returns) > 0 else 0.02
             
             if models[symbol] is None:
-                # Initial exploration
-                target_position = np.random.uniform(-0.5, 0.5)
-                raw_positions[symbol] = target_position
+                # Initial exploration / Warm-up
+                action = np.random.choice(["BUY", "SELL", "HOLD", "FLATTEN"])
+                confidence = 0.5  # Fixed confidence for warm-up
+                
+                equity, new_position, cost = simulators[symbol].execute_action(
+                    equity, positions[symbol], action, volatility, confidence
+                )
+                
+                raw_positions[symbol] = new_position
+                chosen_actions[symbol] = action
+                step_costs[symbol] = cost
                 continue
             
             # Predict action
@@ -622,54 +647,63 @@ def walk_forward_backtest(
             action, confidence = models[symbol].act(state, exploration=exploration)
             
             # Execute action
-            equity, new_position = simulators[symbol].execute_action(
+            equity, new_position, cost = simulators[symbol].execute_action(
                 equity, positions[symbol], action, volatility, confidence
             )
             
             raw_positions[symbol] = new_position
+            chosen_actions[symbol] = action
+            step_costs[symbol] = cost
         
         # === PORTFOLIO ALLOCATION ===
         positions = allocator.allocate(raw_positions)
         
         # === COMPUTE REALIZED RETURNS AND STORE EXPERIENCES ===
         next_t = t + 1
-        total_pnl = 0.0
+        total_step_pnl  = 0.0
         
         for symbol in symbols:
-            # Compute realized PnL
+            # 1. Price Return
             price_return = prices[symbol].iloc[next_t] / prices[symbol].iloc[t] - 1
-            position_pnl = price_return * positions[symbol]
             
-            # Short cost
+            # 2. Position PnL
+            gross_pnl = price_return * positions[symbol]
+            
+            # 3. Shorting Costs
             if positions[symbol] < 0:
-                position_pnl -= cfg.SHORT_COST_ANNUAL / 252 * abs(positions[symbol])
+                gross_pnl -= cfg.SHORT_COST_ANNUAL / 252 * abs(positions[symbol])
             
-            total_pnl += position_pnl
+            # 4. Transaction Costs (The missing link!)
+            # We subtract the cost we JUST paid to enter this position
+            net_pnl = gross_pnl - step_costs[symbol]
             
-            # Store experience
+            total_step_pnl += net_pnl
+            
+            # 5. Store Experience with NET Reward
+            # We scale reward by 100 to help the model see bigger numbers (basis points vs tiny decimals)
+            reward_scaled = net_pnl * 100 
+            
             state_cols = [c for c in features.columns if c.startswith(f"{symbol}_")]
             state = features.iloc[t][state_cols].values
             next_state = features.iloc[next_t][state_cols].values
             
-            pos = positions[symbol]
-            if abs(pos) < 0.01:
-                action_taken = "FLATTEN"
-            elif pos > 0:
-                action_taken = "BUY"
-            else:
-                action_taken = "SELL"
-            
             buffers[symbol].add(
                 state=state,
-                action=action_taken,
-                position=pos,
-                reward=position_pnl,
+                action=chosen_actions[symbol],
+                position=positions[symbol],  
+                reward=reward_scaled,  # <--- FIX: Training on Net PnL
                 next_state=next_state,
                 feature_names=state_cols
             )
         
-        # Update equity
-        equity *= (1 + total_pnl)
+        # Update Equity (Simple Compounding)
+        # Note: Transaction costs were already deducted from equity in execute_action,
+        # so here we just add the price PnL.
+        step_price_pnl = sum(
+            (prices[s].iloc[next_t] / prices[s].iloc[t] - 1) * positions[s] 
+            for s in symbols
+        )
+        equity *= (1 + step_price_pnl)
         
         equity_history.append(equity)
         position_history.append(positions.copy())
@@ -722,7 +756,7 @@ def main():
     print(f"🎯 FINAL RESULTS")
     print(f"{'='*60}")
     print(f"Final equity:  ${results['final_equity']:.2f}")
-    print(f"Total return:  {(results['final_equity'] - 100) / 100 * 100:+.1f}%")
+    print(f"Total return:  {(results['final_equity'] - 100000) / 100000 * 100:+.1f}%")
     print(f"{'='*60}\n")
 
 
