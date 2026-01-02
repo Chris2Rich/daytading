@@ -24,7 +24,8 @@ class Config:
     LOOKBACK_DAYS: int = 730
 
     # Portfolio constraints
-    PORTFOLIO_LEVERAGE: float = 1.0  # Sum of |positions| = 1.0
+    PORTFOLIO_LEVERAGE: float = 1.0
+    CONCENTRATION_PENALTY: float = 0.1
     
     # Costs
     FEE_FIXED: float = 1.0
@@ -38,15 +39,15 @@ class Config:
     RETRAIN_FREQ: int = 21
     
     # Model ensemble
-    NUM_MODELS: int = 50        # Reduced for faster training
+    NUM_MODELS: int = 20        # Reduced for faster training
     MAX_DEPTH: int = 3
-    NUM_LEAVES: int = 4
-    LEARNING_RATE: float = 0.01
-    NUM_ROUNDS: int = 100
+    NUM_LEAVES: int = 8
+    LEARNING_RATE: float = 2e-3
+    NUM_ROUNDS: int = 300
     
     # Feature selection
     FEATURE_SELECTION: bool = True
-    MAX_FEATURES: int = 50
+    MAX_FEATURES: int = 30
 
 
 # ============================================================================
@@ -212,7 +213,6 @@ def engineer_features(data: pd.DataFrame, symbol: str, all_symbols: List[str]) -
     
     return df
 
-
 def compute_rsi(close: pd.Series, window: int) -> pd.Series:
     """Compute RSI indicator."""
     delta = close.diff()
@@ -229,7 +229,7 @@ def build_feature_matrix(data: pd.DataFrame, symbols: List[str]) -> pd.DataFrame
     combined = pd.concat(feats, axis=1)
     
     # CRITICAL FIX: Use forward fill instead of dropna
-    combined = combined.ffill().bfill()
+    combined = combined.ffill()
     
     # Only drop rows where ALL values are NaN
     combined = combined.dropna(how='all')
@@ -280,9 +280,6 @@ class FeatureSelector:
         
         # Select top features
         self.selected_features = importance.head(self.max_features)['feature'].tolist()
-        
-        print(f"  ✓ Selected {len(self.selected_features)} features")
-        print(f"    Top 5: {self.selected_features[:5]}")
         
         return self.selected_features
     
@@ -477,13 +474,13 @@ class EnsembleQModel:
                 
                 params = {
                     "objective": "regression",
-                    "metric": "mse",
+                    "metric": "l2",
                     "max_depth": self.cfg.MAX_DEPTH,
                     "num_leaves": self.cfg.NUM_LEAVES,
                     "learning_rate": self.cfg.LEARNING_RATE,
-                    "feature_fraction": 0.8,
-                    "bagging_fraction": 0.8,
-                    "bagging_freq": 5,
+                    "feature_fraction": 0.4,
+                    "bagging_fraction": 0.6,
+                    "bagging_freq": 1,
                     "seed": 42 + i,
                     "verbosity": -1,
                 }
@@ -500,9 +497,7 @@ class EnsembleQModel:
                 )
                 
                 self.models[action].append(model)
-            
-            print(f"    ✓ {action}: Trained {len(self.models[action])} models on {len(X_action)} samples")
-    
+                
     def predict(self, state: pd.DataFrame) -> Tuple[Dict[str, float], Dict[str, float]]:
         """Predict Q-values and uncertainties for all actions."""
         # Ensure state has the same features used during training
@@ -591,6 +586,7 @@ def walk_forward_backtest(
     print(f"   Initial equity: ${equity:.2f}\n")
     
     total_fees_paid = 0.0
+    has_reset_equity = False
 
     for t in range(min_t, len(features) - 1):
         
@@ -599,19 +595,28 @@ def walk_forward_backtest(
             break
         # === RETRAIN MODELS ===
         if (t - min_t) % cfg.RETRAIN_FREQ == 0:
-            print(f"🔄 Retraining at t={t} ({features.index[t].date()})")
             
             for symbol in symbols:
                 experiences = buffers[symbol].get_all()
                 
                 if len(experiences) < 50:
-                    print(f"  ⚠️  {symbol}: Not enough experiences ({len(experiences)})")
                     continue
                 
-                print(f"  📊 {symbol}: Training on {len(experiences)} experiences")
                 model = EnsembleQModel(cfg, n_models=cfg.NUM_MODELS)
                 model.train(experiences, feature_selector)
                 models[symbol] = model
+    
+            if not has_reset_equity and models[symbols[0]] is not None:
+                print(f"  ✨ Warm-up complete. Resetting Equity from ${equity:.2f} to $100,000.00")
+                has_reset_equity = True
+                
+                # Optional: Clear history so the chart starts fresh
+                equity = 100000.0
+                positions = {s: 0.0 for s in symbols}
+                
+                # History tracking
+                equity_history = [equity]
+                position_history = [{s: 0.0 for s in symbols}]
         
         # === PREDICT ACTIONS FOR EACH SYMBOL ===
         raw_positions = {}
@@ -657,6 +662,16 @@ def walk_forward_backtest(
         
         # === PORTFOLIO ALLOCATION ===
         positions = allocator.allocate(raw_positions)
+
+        active_weights = [abs(p) for p in positions.values()]
+        total_exposure = sum(active_weights)
+        
+        if total_exposure > 1e-6:
+            # Normalize to 1.0 for HHI calc (in case leverage != 1)
+            norm_weights = [w / total_exposure for w in active_weights]
+            hhi = sum(w**2 for w in norm_weights)
+        else:
+            hhi = 0.0 # No penalty if we aren't holding anything
         
         # === COMPUTE REALIZED RETURNS AND STORE EXPERIENCES ===
         next_t = t + 1
@@ -676,8 +691,10 @@ def walk_forward_backtest(
             # 4. Transaction Costs (The missing link!)
             # We subtract the cost we JUST paid to enter this position
             net_pnl = gross_pnl - step_costs[symbol]
-            
+            concentration_cost = cfg.CONCENTRATION_PENALTY * hhi * total_exposure
+
             total_step_pnl += net_pnl
+            total_step_pnl -= concentration_cost
             
             # 5. Store Experience with NET Reward
             # We scale reward by 100 to help the model see bigger numbers (basis points vs tiny decimals)
@@ -707,10 +724,9 @@ def walk_forward_backtest(
         
         equity_history.append(equity)
         position_history.append(positions.copy())
-        
-        # Progress
-        if t % 50 == 0 or t == len(features) - 2:
-            print(f"  t={t:4d} | equity=${equity:7.2f} | positions={positions}")
+    
+
+        print(f"  💰 Equity: ${equity:.2f} | Positions: {positions}")
     
     return {
         "equity": equity_history,
@@ -725,7 +741,7 @@ def walk_forward_backtest(
 
 def main():
     cfg = Config(
-        SYMBOLS=["SPY", "QQQ"],
+        SYMBOLS=["TEAM", "TKO", "DTE", "NFLX", "SPY", "^VIX"],
         FEATURE_SELECTION=True,
         MAX_FEATURES=50,
         MIN_TRAIN_DAYS=100,  # Reduced for faster startup
