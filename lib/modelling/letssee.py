@@ -593,7 +593,7 @@ def walk_forward_backtest(
             for symbol in symbols:
                 experiences = buffers[symbol].get_all()
                 
-                if len(experiences) < 100:
+                if len(experiences) < 50:
                     print(f"  ⚠️  {symbol}: Not enough experiences ({len(experiences)})")
                     continue
                 
@@ -607,22 +607,24 @@ def walk_forward_backtest(
         raw_positions = {}
         
         for symbol in symbols:
-            if models[symbol] is None:
-                raw_positions[symbol] = 0.0
-                continue
-            
             # Get state features
             state_cols = [c for c in features.columns if c.startswith(f"{symbol}_")]
             state = features.iloc[[t]][state_cols].copy()
             state[f"{symbol}_position"] = positions[symbol]
             
-            # Predict action (with decreasing exploration)
-            exploration = max(0.1, 1.0 - t / len(features))
-            action, confidence = models[symbol].act(state, exploration=exploration)
-            
             # Calculate recent volatility for position sizing
             recent_returns = prices[symbol].iloc[max(0, t-21):t].pct_change()
             volatility = recent_returns.std() if len(recent_returns) > 0 else 0.02
+            
+            if models[symbol] is None:
+                # --- INITIAL EXPLORATION ---
+                target_position = np.random.uniform(-0.5, 0.5)
+                raw_positions[symbol] = target_position
+                continue
+            
+            # Predict action (with decreasing exploration)
+            exploration = max(0.1, 1.0 - t / len(features))
+            action, confidence = models[symbol].act(state, exploration=exploration)
             
             # Execute action
             equity, new_position = simulators[symbol].execute_action(
@@ -639,9 +641,6 @@ def walk_forward_backtest(
         total_pnl = 0.0
         
         for symbol in symbols:
-            if positions[symbol] == 0:
-                continue
-            
             # Compute realized PnL
             price_return = prices[symbol].iloc[next_t] / prices[symbol].iloc[t] - 1
             position_pnl = price_return * positions[symbol]
@@ -652,12 +651,11 @@ def walk_forward_backtest(
             
             total_pnl += position_pnl
             
-            # Store experience (NO FORWARD-LOOKING)
+            # Store experience (even if position = 0)
             state_cols = [c for c in features.columns if c.startswith(f"{symbol}_")]
             state = features.iloc[t][state_cols].values
             next_state = features.iloc[next_t][state_cols].values
             
-            # Get the action that was taken (reverse lookup)
             pos = positions[symbol]
             if abs(pos) < 0.01:
                 action_taken = "FLATTEN"
@@ -670,7 +668,7 @@ def walk_forward_backtest(
                 state=state,
                 action=action_taken,
                 position=pos,
-                reward=position_pnl,  # REALIZED reward, no forward-looking
+                reward=position_pnl,
                 next_state=next_state
             )
         
@@ -681,7 +679,7 @@ def walk_forward_backtest(
         position_history.append(positions.copy())
         
         # Progress
-        if t % 100 == 0:
+        if t % 50 == 0:
             print(f"t={t}, equity={equity:.2f}, positions={positions}")
     
     return {
