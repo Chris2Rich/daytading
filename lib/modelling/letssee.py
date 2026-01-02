@@ -38,7 +38,7 @@ class Config:
     RETRAIN_FREQ: int = 21
     
     # Model ensemble
-    NUM_MODELS: int = 50        # Few ensemble members
+    NUM_MODELS: int = 5        # Reduced for faster training
     MAX_DEPTH: int = 3
     NUM_LEAVES: int = 4
     LEARNING_RATE: float = 0.01
@@ -62,26 +62,22 @@ def load_data(symbols: list, days: int, interval: str) -> pd.DataFrame:
         if data.empty:
             continue
             
-        # --- FIX STARTS HERE ---
-        # 1. Normalize columns: yfinance might return ('Close', 'SPY') or just 'Close'
-        # We extract just the feature name (e.g., 'Close')
+        # Normalize columns
         clean_columns = []
         for c in data.columns:
             if isinstance(c, tuple):
-                clean_columns.append(c[0])  # Extract 'Close' from ('Close', 'SPY')
+                clean_columns.append(c[0])
             else:
-                clean_columns.append(c)     # Keep 'Close' as is
+                clean_columns.append(c)
         
-        # 2. Create the clean (Feature, Symbol) MultiIndex
+        # Create clean (Feature, Symbol) MultiIndex
         data.columns = pd.MultiIndex.from_tuples([(c, sym) for c in clean_columns])
-        # --- FIX ENDS HERE ---
-        
         dfs.append(data)
     
     if not dfs:
         return pd.DataFrame()
     
-    combined = pd.concat(dfs, axis=1).sort_index().fillna(method='ffill')
+    combined = pd.concat(dfs, axis=1).sort_index().ffill()
     print(f"✓ Loaded {len(combined)} rows")
     return combined
 
@@ -110,7 +106,7 @@ def engineer_features(data: pd.DataFrame, symbol: str, all_symbols: List[str]) -
     returns = close.pct_change()
     for w in [5, 10, 21, 42, 63]:
         df[f"vol_{w}"] = returns.rolling(w).std()
-        df[f"vol_rank_{w}"] = df[f"vol_{w}"].rolling(252).rank(pct=True)
+        df[f"vol_rank_{w}"] = df[f"vol_{w}"].rolling(min(252, len(close))).rank(pct=True)
     
     # Parkinson volatility (uses high-low)
     for w in [5, 21]:
@@ -169,7 +165,7 @@ def engineer_features(data: pd.DataFrame, symbol: str, all_symbols: List[str]) -
     
     # === RANGE & MICROSTRUCTURE ===
     df["range"] = (high - low) / close
-    df["range_rank"] = df["range"].rolling(252).rank(pct=True)
+    df["range_rank"] = df["range"].rolling(min(252, len(close))).rank(pct=True)
     
     # Gap
     df["gap"] = (close - close.shift(1).shift(-1)) / close.shift(1).shift(-1)
@@ -178,23 +174,22 @@ def engineer_features(data: pd.DataFrame, symbol: str, all_symbols: List[str]) -
     df["hl_position"] = (close - low) / (high - low + 1e-9)
     
     # === REGIME FEATURES ===
-    # Trend strength (ADX-like)
+    # Trend strength
     for w in [10, 21]:
         df[f"trend_strength_{w}"] = abs(df[f"price_sma_{w}"])
     
     # Volatility regime
     vol_21 = returns.rolling(21).std()
-    df["vol_regime"] = vol_21.rolling(252).rank(pct=True)
+    df["vol_regime"] = vol_21.rolling(min(252, len(close))).rank(pct=True)
     
     # Drawdown
-    rolling_max = close.rolling(252, min_periods=1).max()
+    rolling_max = close.rolling(min(252, len(close)), min_periods=1).max()
     df["drawdown"] = (close / rolling_max - 1)
     
-    # === CROSS-ASSET FEATURES (if multiple symbols) ===
+    # === CROSS-ASSET FEATURES ===
     if len(all_symbols) > 1:
         other_symbols = [s for s in all_symbols if s != symbol]
-        for other in other_symbols[:3]:  # Limit to 3 for performance
-            # FIX: Check for ("Close", other) instead of (other, "Close")
+        for other in other_symbols[:3]:
             if ("Close", other) in data.columns:
                 other_close = data[("Close", other)]
                 other_ret = other_close.pct_change()
@@ -229,8 +224,23 @@ def compute_rsi(close: pd.Series, window: int) -> pd.Series:
 
 def build_feature_matrix(data: pd.DataFrame, symbols: List[str]) -> pd.DataFrame:
     """Build comprehensive feature matrix for all symbols."""
+    print("🔧 Engineering features...")
     feats = [engineer_features(data, s, symbols) for s in symbols]
-    return pd.concat(feats, axis=1).dropna()
+    combined = pd.concat(feats, axis=1)
+    
+    # CRITICAL FIX: Use forward fill instead of dropna
+    combined = combined.ffill().bfill()
+    
+    # Only drop rows where ALL values are NaN
+    combined = combined.dropna(how='all')
+    
+    print(f"✓ Feature matrix: {combined.shape[0]} rows × {combined.shape[1]} columns")
+    print(f"  NaN count: {combined.isna().sum().sum()}")
+    
+    # Fill any remaining NaNs with 0
+    combined = combined.fillna(0)
+    
+    return combined
 
 
 # ============================================================================
@@ -246,6 +256,11 @@ class FeatureSelector:
     
     def fit(self, X: pd.DataFrame, y: pd.Series):
         """Train a model and extract top features by importance."""
+        
+        # Filter out features with zero variance
+        var = X.var()
+        valid_features = var[var > 1e-10].index
+        X = X[valid_features]
         
         model = lgb.LGBMRegressor(
             n_estimators=100,
@@ -266,8 +281,8 @@ class FeatureSelector:
         # Select top features
         self.selected_features = importance.head(self.max_features)['feature'].tolist()
         
-        print(f"✓ Selected {len(self.selected_features)} features")
-        print(f"Top 10: {self.selected_features[:10]}")
+        print(f"  ✓ Selected {len(self.selected_features)} features")
+        print(f"    Top 5: {self.selected_features[:5]}")
         
         return self.selected_features
     
@@ -290,14 +305,15 @@ class ExperienceBuffer:
         self.max_size = max_size
     
     def add(self, state: np.ndarray, action: str, position: float, 
-            reward: float, next_state: np.ndarray):
+            reward: float, next_state: np.ndarray, feature_names: List[str] = None):
         """Add experience tuple."""
         self.buffer.append({
             'state': state,
             'action': action,
             'position': position,
             'reward': reward,
-            'next_state': next_state
+            'next_state': next_state,
+            'feature_names': feature_names
         })
         
         if len(self.buffer) > self.max_size:
@@ -329,17 +345,9 @@ class ActionSimulator:
         current_position: float,
         action: str,
         volatility: float,
-        confidence: float = 0.5  # Model confidence [0, 1]
+        confidence: float = 0.5
     ) -> Tuple[float, float]:
-        """
-        Execute an action and return new equity and position.
-        
-        Actions:
-        - HOLD: Keep current position
-        - BUY: Set position to [0, 1) based on confidence
-        - SELL: Set position to (-1, 0] based on confidence
-        - FLATTEN: Set position to 0
-        """
+        """Execute an action and return new equity and position."""
         
         if action == "HOLD":
             return equity, current_position
@@ -348,7 +356,6 @@ class ActionSimulator:
             target_position = 0.0
         
         elif action == "BUY":
-            # Scale position by confidence and inverse volatility
             vol_scale = np.clip(0.02 / (volatility + 1e-9), 0.1, 2.0)
             target_position = confidence * vol_scale
             target_position = np.clip(target_position, 0.0, 0.99)
@@ -363,7 +370,7 @@ class ActionSimulator:
         
         # Calculate trade cost
         trade_size = abs(target_position - current_position)
-        if trade_size > 0.01:  # Only charge costs for meaningful trades
+        if trade_size > 0.01:
             slippage = self.cfg.SLIPPAGE_BPS / 10000 * trade_size
             fees = self.cfg.FEE_PCT * trade_size + self.cfg.FEE_FIXED / equity
             penalty = self.cfg.TRADE_PENALTY * trade_size
@@ -384,15 +391,7 @@ class PortfolioAllocator:
         self.leverage = leverage
     
     def allocate(self, raw_positions: Dict[str, float]) -> Dict[str, float]:
-        """
-        Normalize positions to meet leverage constraint.
-        
-        Args:
-            raw_positions: {symbol: position} where position in [-inf, inf]
-        
-        Returns:
-            Normalized positions where sum(|positions|) = leverage
-        """
+        """Normalize positions to meet leverage constraint."""
         total_abs = sum(abs(p) for p in raw_positions.values())
         
         if total_abs < 1e-6:
@@ -416,27 +415,26 @@ class EnsembleQModel:
         self.features = None
     
     def train(self, experiences: List[Dict], feature_selector: Optional[FeatureSelector] = None):
-        """
-        Train ensemble models on experience replay buffer.
-        
-        Each model learns Q(s,a) from actual observed rewards.
-        """
+        """Train ensemble models on experience replay buffer."""
         
         # Convert experiences to training data
         states = []
         actions_taken = []
         rewards = []
+        feature_names = None
         
         for exp in experiences:
             states.append(exp['state'])
             actions_taken.append(exp['action'])
             rewards.append(exp['reward'])
+            if feature_names is None and 'feature_names' in exp:
+                feature_names = exp['feature_names']
         
-        X = pd.DataFrame(states)
+        # Create DataFrame with proper column names
+        X = pd.DataFrame(states, columns=feature_names)
         
         # Feature selection
-        if feature_selector and self.cfg.FEATURE_SELECTION:
-            # Use rewards as target for feature selection
+        if feature_selector and self.cfg.FEATURE_SELECTION and len(X) > 100:
             feature_selector.fit(X, pd.Series(rewards))
             X = feature_selector.transform(X)
         
@@ -444,10 +442,10 @@ class EnsembleQModel:
         
         # Train separate ensemble for each action
         for action in self.models.keys():
-            # Get experiences where this action was taken
             action_mask = np.array(actions_taken) == action
             if action_mask.sum() < 10:
-                continue  # Not enough data
+                print(f"    ⚠️  {action}: Only {action_mask.sum()} samples, skipping")
+                continue
             
             X_action = X[action_mask]
             y_action = np.array(rewards)[action_mask]
@@ -463,6 +461,10 @@ class EnsembleQModel:
                 split_idx = int(len(X_boot) * 0.9)
                 X_train, X_val = X_boot.iloc[:split_idx], X_boot.iloc[split_idx:]
                 y_train, y_val = y_boot[:split_idx], y_boot[split_idx:]
+                
+                if len(X_val) < 2:
+                    X_train, X_val = X_boot, X_boot
+                    y_train, y_val = y_boot, y_boot
                 
                 ds_train = lgb.Dataset(X_train, y_train)
                 ds_val = lgb.Dataset(X_val, y_val, reference=ds_train)
@@ -492,15 +494,16 @@ class EnsembleQModel:
                 )
                 
                 self.models[action].append(model)
+            
+            print(f"    ✓ {action}: Trained {len(self.models[action])} models on {len(X_action)} samples")
     
     def predict(self, state: pd.DataFrame) -> Tuple[Dict[str, float], Dict[str, float]]:
-        """
-        Predict Q-values and uncertainties for all actions.
+        """Predict Q-values and uncertainties for all actions."""
+        # Ensure state has the same features used during training
+        if not all(f in state.columns for f in self.features):
+            missing = [f for f in self.features if f not in state.columns]
+            raise ValueError(f"Missing features: {missing[:5]}...")
         
-        Returns:
-            q_values: {action: mean_q_value}
-            uncertainties: {action: std_q_value}
-        """
         X = state[self.features]
         
         q_values = {}
@@ -519,13 +522,7 @@ class EnsembleQModel:
         return q_values, uncertainties
     
     def act(self, state: pd.DataFrame, exploration: float = 0.0) -> Tuple[str, float]:
-        """
-        Select action using Upper Confidence Bound (UCB).
-        
-        Returns:
-            action: Selected action
-            confidence: Confidence score [0, 1]
-        """
+        """Select action using Upper Confidence Bound (UCB)."""
         q_values, uncertainties = self.predict(state)
         
         # UCB: Q(s,a) + c * uncertainty(s,a)
@@ -536,7 +533,7 @@ class EnsembleQModel:
         
         best_action = max(ucb_values, key=ucb_values.get)
         
-        # Confidence based on Q-value and low uncertainty
+        # Confidence based on Q-value
         q_range = max(q_values.values()) - min(q_values.values())
         confidence = np.clip(
             (q_values[best_action] - min(q_values.values())) / (q_range + 1e-9),
@@ -555,11 +552,7 @@ def walk_forward_backtest(
     prices: Dict[str, pd.Series],
     cfg: Config,
 ) -> Dict:
-    """
-    Walk-forward backtest with NO forward-looking bias.
-    
-    Training uses only PAST experiences (state, action, realized_reward).
-    """
+    """Walk-forward backtest with NO forward-looking bias."""
     
     symbols = list(prices.keys())
     equity = 100.0
@@ -569,10 +562,10 @@ def walk_forward_backtest(
     equity_history = [equity]
     position_history = [{s: 0.0 for s in symbols}]
     
-    # Experience buffers (one per symbol)
+    # Experience buffers
     buffers = {s: ExperienceBuffer(max_size=5000) for s in symbols}
     
-    # Models (one per symbol)
+    # Models
     models = {s: None for s in symbols}
     
     # Simulators and allocators
@@ -584,11 +577,14 @@ def walk_forward_backtest(
     
     min_t = cfg.MIN_TRAIN_DAYS
     
+    print(f"\n🚀 Starting backtest from t={min_t} to t={len(features)-1}")
+    print(f"   Initial equity: ${equity:.2f}\n")
+    
     for t in range(min_t, len(features) - 1):
         
         # === RETRAIN MODELS ===
         if (t - min_t) % cfg.RETRAIN_FREQ == 0:
-            print(f"\n🔄 Retraining at t={t} ({features.index[t].date()})")
+            print(f"🔄 Retraining at t={t} ({features.index[t].date()})")
             
             for symbol in symbols:
                 experiences = buffers[symbol].get_all()
@@ -597,11 +593,10 @@ def walk_forward_backtest(
                     print(f"  ⚠️  {symbol}: Not enough experiences ({len(experiences)})")
                     continue
                 
+                print(f"  📊 {symbol}: Training on {len(experiences)} experiences")
                 model = EnsembleQModel(cfg, n_models=cfg.NUM_MODELS)
                 model.train(experiences, feature_selector)
                 models[symbol] = model
-                
-                print(f"  ✓ {symbol}: Trained on {len(experiences)} experiences")
         
         # === PREDICT ACTIONS FOR EACH SYMBOL ===
         raw_positions = {}
@@ -612,18 +607,18 @@ def walk_forward_backtest(
             state = features.iloc[[t]][state_cols].copy()
             state[f"{symbol}_position"] = positions[symbol]
             
-            # Calculate recent volatility for position sizing
+            # Calculate recent volatility
             recent_returns = prices[symbol].iloc[max(0, t-21):t].pct_change()
             volatility = recent_returns.std() if len(recent_returns) > 0 else 0.02
             
             if models[symbol] is None:
-                # --- INITIAL EXPLORATION ---
+                # Initial exploration
                 target_position = np.random.uniform(-0.5, 0.5)
                 raw_positions[symbol] = target_position
                 continue
             
-            # Predict action (with decreasing exploration)
-            exploration = max(0.1, 1.0 - t / len(features))
+            # Predict action
+            exploration = max(0.1, 1.0 - (t - min_t) / (len(features) - min_t))
             action, confidence = models[symbol].act(state, exploration=exploration)
             
             # Execute action
@@ -651,7 +646,7 @@ def walk_forward_backtest(
             
             total_pnl += position_pnl
             
-            # Store experience (even if position = 0)
+            # Store experience
             state_cols = [c for c in features.columns if c.startswith(f"{symbol}_")]
             state = features.iloc[t][state_cols].values
             next_state = features.iloc[next_t][state_cols].values
@@ -669,7 +664,8 @@ def walk_forward_backtest(
                 action=action_taken,
                 position=pos,
                 reward=position_pnl,
-                next_state=next_state
+                next_state=next_state,
+                feature_names=state_cols
             )
         
         # Update equity
@@ -679,8 +675,8 @@ def walk_forward_backtest(
         position_history.append(positions.copy())
         
         # Progress
-        if t % 50 == 0:
-            print(f"t={t}, equity={equity:.2f}, positions={positions}")
+        if t % 50 == 0 or t == len(features) - 2:
+            print(f"  t={t:4d} | equity=${equity:7.2f} | positions={positions}")
     
     return {
         "equity": equity_history,
@@ -695,16 +691,26 @@ def walk_forward_backtest(
 
 def main():
     cfg = Config(
-        SYMBOLS=["SPY", "QQQ"],  # Multi-asset portfolio
+        SYMBOLS=["SPY", "QQQ"],
         FEATURE_SELECTION=True,
-        MAX_FEATURES=50
+        MAX_FEATURES=50,
+        MIN_TRAIN_DAYS=100,  # Reduced for faster startup
+        RETRAIN_FREQ=21
     )
     
     # Load data
     data = load_data(cfg.SYMBOLS, cfg.LOOKBACK_DAYS, cfg.INTERVAL)
     
+    if data.empty:
+        print("❌ No data loaded!")
+        return
+    
     # Build features
     features = build_feature_matrix(data, cfg.SYMBOLS)
+    
+    if len(features) < cfg.MIN_TRAIN_DAYS + 10:
+        print(f"❌ Not enough data! Need {cfg.MIN_TRAIN_DAYS + 10}, got {len(features)}")
+        return
     
     # Extract prices
     prices = {sym: data[("Close", sym)].loc[features.index] for sym in cfg.SYMBOLS}
@@ -712,8 +718,12 @@ def main():
     # Run backtest
     results = walk_forward_backtest(features, prices, cfg)
     
-    print(f"\n🎯 Final equity: ${results['final_equity']:.2f}")
-    print(f"📈 Total return: {(results['final_equity'] - 100) / 100 * 100:.1f}%")
+    print(f"\n{'='*60}")
+    print(f"🎯 FINAL RESULTS")
+    print(f"{'='*60}")
+    print(f"Final equity:  ${results['final_equity']:.2f}")
+    print(f"Total return:  {(results['final_equity'] - 100) / 100 * 100:+.1f}%")
+    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":
