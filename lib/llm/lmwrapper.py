@@ -5,11 +5,8 @@ import json
 import asyncio
 import aiohttp
 from typing import AsyncGenerator, List, Optional, Dict, Any
-import re
 import sys
 from datetime import datetime
-
-sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
 from lib.retrieval.search import SearchTool
 from lib.retrieval.marketdata import MarketDataTool
