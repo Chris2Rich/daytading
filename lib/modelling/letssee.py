@@ -327,6 +327,7 @@ class RegimeInferenceModule:
             # 5. NEUTRAL
             else:
                 labels.append(MarketRegime.NEUTRAL.value)
+        return labels
         
     def train(self, features_df: pd.DataFrame, symbol: str):
         """Train regime classifier."""
