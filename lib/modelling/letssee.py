@@ -935,45 +935,103 @@ def pomdp_walk_forward_backtest(
 # VISUALIZATION
 # ============================================================================
 
-def plot_pomdp_performance(results: Dict, feature_index: pd.DatetimeIndex, min_t: int):
+def plot_pomdp_performance(results: Dict, feature_index: pd.DatetimeIndex, min_t: int, benchmark_symbol: str = "SPY"):
     """
-    Plot equity curve, drawdown, and position history.
-    
-    Args:
-        results: Dictionary returned from backtest
-        feature_index: The full DatetimeIndex from features_df
-        min_t: The starting index of the backtest
+    Plot equity curve vs Benchmark, drawdown, and position history.
+    Automatically fetches benchmark data if not present in prices_dict.
     """
-    print("\n📊 Generating performance plots...")
+    print("\nGenerating performance plots...")
     
     # 1. Align Data with Dates
-    # The simulation runs from min_t to the end. 
-    # results['equity'] has one initial value, so we map it to min_t-1 to end
-    
-    # Slice the index to match the backtest duration
-    # We add 1 because equity history includes the starting state
+    # The simulation runs from min_t to the end.
     sim_dates = feature_index[min_t : min_t + len(results['equity'])]
     
-    # Handle potential length mismatch by trimming the longer one
+    # Handle length mismatch
     min_len = min(len(sim_dates), len(results['equity']))
     sim_dates = sim_dates[:min_len]
     equity_curve = pd.Series(results['equity'][:min_len], index=sim_dates)
     
     # Positions alignment
     pos_df = pd.DataFrame(results['positions'])
-    pos_df = pos_df.iloc[:min_len] # Ensure length matches
+    pos_df = pos_df.iloc[:min_len]
     pos_df.index = sim_dates
     
-    # 2. Calculate Drawdown
+    # 2. Get Benchmark Prices (Handle Missing Data)
+    bench_prices = None
+    
+    # Case A: Benchmark is already in our loaded data
+    
+    # Case B: Fetch Benchmark from Yahoo Finance if missing
+    try:
+        import yfinance as yf
+        
+        # Get start/end from simulation
+        start_date = sim_dates[0].date()
+        # Add a few days buffer to end date
+        end_date = (sim_dates[-1] + timedelta(days=5)).date()
+        
+        # Download
+        df = yf.download(benchmark_symbol, start=start_date, end=end_date, progress=False, auto_adjust=True)
+        
+        if not df.empty:
+            # Handle MultiIndex or single column issues
+            if 'Close' in df.columns:
+                p = df['Close']
+            else:
+                p = df.iloc[:, 0]
+            
+            if isinstance(p, pd.DataFrame):
+                p = p.squeeze()
+            
+            bench_prices = p
+        else:
+            print(f"Could not fetch {benchmark_symbol}.")
+            
+    except Exception as e:
+        print(f"Benchmark fetch failed: {e}")
+
+    # 3. Calculate Benchmark Equity (Buy & Hold)
+    benchmark_equity = None
+    if bench_prices is not None:
+        try:
+            # Reindex to match simulation timestamps (Forward fill to fill gaps/weekends/hours)
+            # This aligns Daily SPY data to Hourly strategy data if necessary
+            bench_aligned = bench_prices.reindex(sim_dates, method='ffill')
+            
+            # Handle potential NaNs at the start (if SPY data starts later)
+            bench_aligned = bench_aligned.fillna(method='bfill')
+            
+            start_price = float(bench_aligned.iloc[0])
+            start_cap = float(equity_curve.iloc[0])
+            
+            if start_price > 0:
+                benchmark_equity = (bench_aligned / start_price) * start_cap
+        except Exception as e:
+            print(f"  ⚠️  Could not align benchmark data: {e}")
+
+    # 4. Calculate Drawdown
     running_max = equity_curve.expanding().max()
     drawdown = (equity_curve / running_max - 1)
     
-    # 3. Create Plots
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1, 2]})
+    # 5. Create Plots
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14), sharex=True, gridspec_kw={'height_ratios': [2, 1, 2]})
     
-    # -- Panel 1: Equity --
-    ax1.plot(equity_curve, color='green', linewidth=1.5, label='Portfolio Equity')
-    ax1.set_title('POMDP Strategy Performance', fontsize=12, fontweight='bold')
+    # -- Panel 1: Equity vs Benchmark --
+    ax1.plot(equity_curve, color='green', linewidth=2, label='POMDP Strategy')
+    
+    title_str = "Strategy Performance"
+    if benchmark_equity is not None:
+        ax1.plot(benchmark_equity, color='gray', linestyle='--', linewidth=1.5, alpha=0.7, label=f'{benchmark_symbol} Buy & Hold')
+        
+        # Calculate Benchmark Return for Title
+        try:
+            bench_ret = (benchmark_equity.iloc[-1] - benchmark_equity.iloc[0]) / benchmark_equity.iloc[0]
+            strat_ret = (equity_curve.iloc[-1] - equity_curve.iloc[0]) / equity_curve.iloc[0]
+            title_str = f"Strategy: {strat_ret:.2%} vs {benchmark_symbol}: {bench_ret:.2%}"
+        except:
+            pass
+
+    ax1.set_title(title_str, fontsize=12, fontweight='bold')
     ax1.set_ylabel('Equity ($)')
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
@@ -991,14 +1049,12 @@ def plot_pomdp_performance(results: Dict, feature_index: pd.DatetimeIndex, min_t
     
     ax3.set_ylabel('Position Size (Leverage)')
     ax3.set_title('Asset Allocation', fontsize=10)
-    ax3.legend(loc='upper left')
+    ax3.legend(loc='upper left', ncol=3)
     ax3.grid(True, alpha=0.3)
     ax3.axhline(0, color='black', linewidth=1, linestyle='--')
     
     # Formatting
     plt.xlabel('Date')
-    
-    # Format x-axis dates
     if len(sim_dates) > 0:
         fig.autofmt_xdate()
         
@@ -1061,8 +1117,8 @@ if __name__ == "__main__":
         SL_MULTIPLIER=1.5,
         VOL_WINDOW=10,
 
-        N_ESTIMATORS=10,
-        MAX_DEPTH=6,
+        N_ESTIMATORS=35,
+        MAX_DEPTH=2,
         MIN_TRAIN_BARS=45,
         RETRAIN_FREQUENCY=20,
 
