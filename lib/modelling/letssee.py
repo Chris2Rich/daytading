@@ -3,118 +3,168 @@ import pandas as pd
 import lightgbm as lgb
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
+from enum import Enum
 import warnings
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
 warnings.filterwarnings("ignore")
 
+# Import data loading utilities
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from lib.retrieval.yahoofinance import get_trading, get_option, get_option_chain, get_fundamentals
+try:
+    from lib.retrieval.yahoofinance import get_trading
+except ImportError:
+    print("⚠️  yahoofinance module not found. Will use synthetic data.")
+    get_trading = None
+
+
+# ============================================================================
+# MARKET REGIME DEFINITIONS
+# ============================================================================
+
+class MarketRegime(Enum):
+    """Hidden market states in the POMDP."""
+    LOW_VOL_TREND = 0
+    HIGH_VOL_TREND = 1
+    MEAN_REVERTING = 2
+    CRISIS = 3
+    NEUTRAL = 4
+
+
+class BarrierOutcome(Enum):
+    """Triple barrier outcomes."""
+    TAKE_PROFIT = 1
+    STOP_LOSS = -1
+    TIMEOUT = 0
+
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
 @dataclass
-class Config:
+class POMDPConfig:
+    """Configuration for POMDP trading system."""
+    
+    # Data
     SYMBOLS: List[str] = None
-    INTERVAL: str = "1d"
     LOOKBACK_DAYS: int = 730
-
-    # Portfolio constraints
-    PORTFOLIO_LEVERAGE: float = 1.0
-    CONCENTRATION_PENALTY: float = 0.1
+    INTERVAL: str = "1d"
     
-    # Costs
-    FEE_FIXED: float = 1.0
-    FEE_PCT: float = 0.00051
-    SLIPPAGE_BPS: float = 2.0
-    SHORT_COST_ANNUAL: float = 0.02
-    TRADE_PENALTY: float = 0.002
-
+    # Regime inference
+    REGIME_LOOKBACK: int = 63
+    
+    # Triple barrier
+    HORIZONS: List[int] = None
+    TP_MULTIPLIER: float = 2.0
+    SL_MULTIPLIER: float = 1.0
+    VOL_WINDOW: int = 21
+    
+    # Probability models
+    N_ESTIMATORS: int = 200
+    MAX_DEPTH: int = 4
+    MIN_SAMPLES_PER_MODEL: int = 100
+    
+    # Policy
+    HORIZON_WEIGHTS: Dict[int, float] = None
+    REGIME_WEIGHT_DECAY: float = 0.3
+    COST_PER_TRADE: float = 0.001
+    UCB_EXPLORATION: float = 1.0
+    
     # Training
-    MIN_TRAIN_DAYS: int = 252
-    RETRAIN_FREQ: int = 21
+    MIN_TRAIN_BARS: int = 150
+    RETRAIN_FREQUENCY: int = 21
+    MAX_BUFFER_SIZE: int = 5000
     
-    # Model ensemble
-    NUM_MODELS: int = 20        # Reduced for faster training
-    MAX_DEPTH: int = 3
-    NUM_LEAVES: int = 8
-    LEARNING_RATE: float = 2e-3
-    NUM_ROUNDS: int = 300
+    # Portfolio
+    PORTFOLIO_LEVERAGE: float = 1.0
     
-    # Feature selection
-    FEATURE_SELECTION: bool = True
-    MAX_FEATURES: int = 30
+    def __post_init__(self):
+        if self.SYMBOLS is None:
+            self.SYMBOLS = ["SPY", "QQQ", "TLT"]
+        if self.HORIZONS is None:
+            self.HORIZONS = [5, 10, 21]
+        if self.HORIZON_WEIGHTS is None:
+            total = sum(self.HORIZONS)
+            self.HORIZON_WEIGHTS = {h: h/total for h in self.HORIZONS}
 
 
 # ============================================================================
 # DATA LOADING
 # ============================================================================
 
-def load_data(symbols: list, days: int, interval: str) -> pd.DataFrame:
-    """Load OHLCV for multiple symbols."""
-    print(f"📊 Loading data: {symbols}")
-    dfs = []
-    for sym in symbols:
-        data = get_trading(sym, days=days, interval=interval)
-        if data.empty:
-            continue
-            
-        # Normalize columns
-        clean_columns = []
-        for c in data.columns:
-            if isinstance(c, tuple):
-                clean_columns.append(c[0])
-            else:
-                clean_columns.append(c)
-        
-        # Create clean (Feature, Symbol) MultiIndex
-        data.columns = pd.MultiIndex.from_tuples([(c, sym) for c in clean_columns])
-        dfs.append(data)
+def load_data(symbols: List[str], days: int, interval: str) -> Dict[str, pd.DataFrame]:
+    """Load OHLCV data for multiple symbols."""
+    print(f"Loading data: {symbols}")
     
-    if not dfs:
-        return pd.DataFrame()
+    data_dict = {}
     
-    combined = pd.concat(dfs, axis=1).sort_index().ffill()
-    print(f"✓ Loaded {len(combined)} rows")
-    return combined
+    if get_trading is not None:
+        for symbol in symbols:
+            try:
+                data = get_trading(symbol, days=days, interval=interval)
+                if not data.empty:
+                    data_dict[symbol] = data
+            except Exception as e:
+                print(f"Failed to load {symbol}: {e}")
+    
+    # Fallback to synthetic data if needed
+    if not data_dict:
+        print("  Using synthetic data")
+        dates = pd.date_range(end=pd.Timestamp.now(), periods=500, freq='D')
+        for symbol in symbols:
+            np.random.seed(hash(symbol) % 2**32)
+            prices = 100 * np.exp(np.cumsum(np.random.randn(500) * 0.01))
+            data_dict[symbol] = pd.DataFrame({
+                'Close': prices,
+                'Open': prices * (1 + np.random.randn(500) * 0.002),
+                'High': prices * (1 + np.abs(np.random.randn(500)) * 0.005),
+                'Low': prices * (1 - np.abs(np.random.randn(500)) * 0.005),
+                'Volume': np.random.randint(1e6, 1e7, 500)
+            }, index=dates)
+    
+    print(f"Loaded {len(data_dict)} symbols")
+    return data_dict
+
 
 # ============================================================================
-# COMPREHENSIVE FEATURE ENGINEERING
+# FEATURE ENGINEERING
 # ============================================================================
 
-def engineer_features(data: pd.DataFrame, symbol: str, all_symbols: List[str]) -> pd.DataFrame:
-    """Generate extensive feature set for a single symbol."""
+def engineer_features(data: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Generate features for a single symbol."""
     df = pd.DataFrame(index=data.index)
     
-    close = data[("Close", symbol)]
-    high = data[("High", symbol)]
-    low = data[("Low", symbol)]
-    volume = data[("Volume", symbol)]
+    close = data['Close']
+    high = data['High']
+    low = data['Low']
+    volume = data['Volume']
+    returns = close.pct_change()
     
-    # === MOMENTUM FEATURES ===
+    # Returns at multiple lags
     for lag in [1, 2, 3, 5, 10, 21, 42, 63]:
         df[f"ret_{lag}"] = close.pct_change(lag)
     
-    # Acceleration (change in momentum)
+    # Acceleration
     df["ret_accel_5"] = df["ret_5"] - df["ret_5"].shift(5)
     df["ret_accel_21"] = df["ret_21"] - df["ret_21"].shift(21)
     
-    # === VOLATILITY FEATURES ===
-    returns = close.pct_change()
+    # Volatility
     for w in [5, 10, 21, 42, 63]:
         df[f"vol_{w}"] = returns.rolling(w).std()
         df[f"vol_rank_{w}"] = df[f"vol_{w}"].rolling(min(252, len(close))).rank(pct=True)
     
-    # Parkinson volatility (uses high-low)
+    # Parkinson volatility
     for w in [5, 21]:
         hl = np.log(high / low)
         df[f"parkinson_vol_{w}"] = np.sqrt(hl.pow(2).rolling(w).mean() / (4 * np.log(2)))
     
-    # === TREND FEATURES ===
+    # Trend
     for w in [10, 21, 50, 100, 200]:
         sma = close.rolling(w).mean()
         df[f"sma_{w}"] = sma
@@ -133,7 +183,7 @@ def engineer_features(data: pd.DataFrame, symbol: str, all_symbols: List[str]) -
     df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
     df["macd_hist"] = df["macd"] - df["macd_signal"]
     
-    # === MEAN REVERSION FEATURES ===
+    # Mean reversion
     for w in [10, 21, 42]:
         mean = close.rolling(w).mean()
         std = close.rolling(w).std()
@@ -147,71 +197,31 @@ def engineer_features(data: pd.DataFrame, symbol: str, all_symbols: List[str]) -
         df[f"bb_upper_{w}"] = (close - (sma + 2*std)) / close
         df[f"bb_lower_{w}"] = (close - (sma - 2*std)) / close
     
-    # === VOLUME FEATURES ===
+    # Volume
     df["rel_vol"] = volume / volume.rolling(21).mean()
     df["vol_trend"] = volume.rolling(21).mean() / volume.rolling(63).mean() - 1
     
-    # Volume-weighted returns
-    for w in [5, 21]:
-        vol_ret = (returns * volume).rolling(w).sum() / volume.rolling(w).sum()
-        df[f"vwap_ret_{w}"] = vol_ret
-    
-    # Money flow
-    typical_price = (high + low + close) / 3
-    money_flow = typical_price * volume
-    for w in [10, 21]:
-        pos_flow = (money_flow * (typical_price > typical_price.shift(1))).rolling(w).sum()
-        neg_flow = (money_flow * (typical_price <= typical_price.shift(1))).rolling(w).sum()
-        df[f"mfi_{w}"] = 100 - 100 / (1 + pos_flow / (neg_flow + 1e-9))
-    
-    # === RANGE & MICROSTRUCTURE ===
+    # Range & microstructure
     df["range"] = (high - low) / close
     df["range_rank"] = df["range"].rolling(min(252, len(close))).rank(pct=True)
-    
-    # Gap
-    df["gap"] = (close - close.shift(1).shift(-1)) / close.shift(1).shift(-1)
-    
-    # High/Low position
+    df["gap"] = (close - close.shift(1)) / close.shift(1)
     df["hl_position"] = (close - low) / (high - low + 1e-9)
     
-    # === REGIME FEATURES ===
-    # Trend strength
+    # Regime features
     for w in [10, 21]:
         df[f"trend_strength_{w}"] = abs(df[f"price_sma_{w}"])
     
-    # Volatility regime
     vol_21 = returns.rolling(21).std()
     df["vol_regime"] = vol_21.rolling(min(252, len(close))).rank(pct=True)
     
-    # Drawdown
     rolling_max = close.rolling(min(252, len(close)), min_periods=1).max()
     df["drawdown"] = (close / rolling_max - 1)
-    
-    # === CROSS-ASSET FEATURES ===
-    if len(all_symbols) > 1:
-        other_symbols = [s for s in all_symbols if s != symbol]
-        for other in other_symbols[:3]:
-            if ("Close", other) in data.columns:
-                other_close = data[("Close", other)]
-                other_ret = other_close.pct_change()
-                
-                # Correlation
-                for w in [21, 63]:
-                    corr = returns.rolling(w).corr(other_ret)
-                    df[f"corr_{other}_{w}"] = corr
-                
-                # Relative strength
-                df[f"rel_strength_{other}"] = close / other_close
-    
-    # === CALENDAR FEATURES ===
-    df["day_of_week"] = df.index.dayofweek
-    df["day_of_month"] = df.index.day
-    df["month"] = df.index.month
     
     # Add symbol prefix
     df.columns = [f"{symbol}_{c}" for c in df.columns]
     
     return df
+
 
 def compute_rsi(close: pd.Series, window: int) -> pd.Series:
     """Compute RSI indicator."""
@@ -222,559 +232,840 @@ def compute_rsi(close: pd.Series, window: int) -> pd.Series:
     return 100 - 100 / (1 + rs)
 
 
-def build_feature_matrix(data: pd.DataFrame, symbols: List[str]) -> pd.DataFrame:
+def build_feature_matrix(data_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Build comprehensive feature matrix for all symbols."""
-    print("🔧 Engineering features...")
-    feats = [engineer_features(data, s, symbols) for s in symbols]
+    print("Engineering features...")
+    
+    feats = []
+    for symbol, data in data_dict.items():
+        feat = engineer_features(data, symbol)
+        feats.append(feat)
+    
     combined = pd.concat(feats, axis=1)
-    
-    # CRITICAL FIX: Use forward fill instead of dropna
-    combined = combined.ffill()
-    
-    # Only drop rows where ALL values are NaN
-    combined = combined.dropna(how='all')
-    
-    print(f"✓ Feature matrix: {combined.shape[0]} rows × {combined.shape[1]} columns")
-    print(f"  NaN count: {combined.isna().sum().sum()}")
-    
-    # Fill any remaining NaNs with 0
-    combined = combined.fillna(0)
+    combined = combined.ffill().fillna(0)
     
     return combined
 
 
 # ============================================================================
-# AI-POWERED FEATURE SELECTION
+# REGIME INFERENCE MODULE
 # ============================================================================
 
-class FeatureSelector:
-    """Use LightGBM feature importance for automated feature selection."""
+class RegimeInferenceModule:
+    """Infer latent market regime from observable features."""
     
-    def __init__(self, max_features: int = 50):
-        self.max_features = max_features
-        self.selected_features = None
+    def __init__(self, config: POMDPConfig):
+        self.config = config
+        self.model: Optional[lgb.Booster] = None
+        self.feature_cols: List[str] = []
     
-    def fit(self, X: pd.DataFrame, y: pd.Series):
-        """Train a model and extract top features by importance."""
+    def extract_regime_features(self, features_df: pd.DataFrame, symbol: str, t: int) -> pd.Series:
+        """Extract regime-relevant features at time t."""
+        regime_feats = {}
         
-        # Filter out features with zero variance
-        var = X.var()
-        valid_features = var[var > 1e-10].index
-        X = X[valid_features]
+        # Volatility regime
+        vol_col = f"{symbol}_vol_21"
+        if vol_col in features_df.columns:
+            regime_feats['volatility'] = features_df[vol_col].iloc[t]
+            regime_feats['vol_rank'] = features_df[f"{symbol}_vol_rank_21"].iloc[t]
         
-        model = lgb.LGBMRegressor(
-            n_estimators=100,
-            max_depth=4,
-            learning_rate=0.1,
-            random_state=42,
-            verbosity=-1
+        # Drawdown
+        dd_col = f"{symbol}_drawdown"
+        if dd_col in features_df.columns:
+            regime_feats['drawdown'] = features_df[dd_col].iloc[t]
+        
+        # Trend strength
+        for w in [10, 21]:
+            ret_col = f"{symbol}_ret_{w}"
+            if ret_col in features_df.columns:
+                regime_feats[f'trend_strength_{w}'] = abs(features_df[ret_col].iloc[t])
+        
+        # Mean reversion signal
+        for w in [10, 21]:
+            z_col = f"{symbol}_zscore_{w}"
+            if z_col in features_df.columns:
+                regime_feats[f'zscore_{w}'] = abs(features_df[z_col].iloc[t])
+        
+        # Volume regime
+        vol_rel_col = f"{symbol}_rel_vol"
+        if vol_rel_col in features_df.columns:
+            regime_feats['volume_regime'] = features_df[vol_rel_col].iloc[t]
+        
+        # Range rank
+        range_col = f"{symbol}_range_rank"
+        if range_col in features_df.columns:
+            regime_feats['range_rank'] = features_df[range_col].iloc[t]
+        
+        return pd.Series(regime_feats)
+    
+    def label_regimes(self, features_df: pd.DataFrame, symbol: str) -> pd.Series:
+        """Create regime labels from observable features using rules."""
+        labels = []
+        
+        for t in range(len(features_df)):
+            rf = self.extract_regime_features(features_df, symbol, t)
+            
+            # 1. CRISIS (Crash Dynamics)
+            if rf.get('drawdown', 0) < -0.15 or rf.get('vol_rank', 0) > 0.90:
+                labels.append(MarketRegime.CRISIS.value)
+                
+            # 2. LOW VOLATILITY UPTREND (The "Grind Up")
+            # If Z-Score is high BUT volatility is low, this is a Bull Trend, not a top.
+            elif rf.get('zscore_21', 0) > 0.5 and rf.get('vol_rank', 0) < 0.4:
+                labels.append(MarketRegime.LOW_VOL_TREND.value)
+                
+            # 3. HIGH VOLATILITY TREND (Strong Momentum)
+            elif rf.get('trend_strength_21', 0) > 0.02 and rf.get('vol_rank', 0) > 0.6:
+                labels.append(MarketRegime.HIGH_VOL_TREND.value)
+                
+            # 4. MEAN REVERTING (Choppy / Overextended)
+            # Only label "Reversion" if we are EXTREMELY overextended (Z > 2.5) 
+            # OR if we are in neutral chop.
+            elif abs(rf.get('zscore_21', 0)) > 2.5:
+                 labels.append(MarketRegime.MEAN_REVERTING.value)
+                 
+            # 5. NEUTRAL
+            else:
+                labels.append(MarketRegime.NEUTRAL.value)
+        
+    def train(self, features_df: pd.DataFrame, symbol: str):
+        """Train regime classifier."""
+        X_list = []
+        for t in range(len(features_df)):
+            rf = self.extract_regime_features(features_df, symbol, t)
+            X_list.append(rf)
+        
+        X = pd.DataFrame(X_list).fillna(0)
+        y = self.label_regimes(features_df, symbol)
+        
+        self.feature_cols = X.columns.tolist()
+        
+        params = {
+            'objective': 'multiclass',
+            'num_class': len(MarketRegime),
+            'metric': 'multi_logloss',
+            'max_depth': 4,
+            'num_leaves': 16,
+            'learning_rate': 0.05,
+            'feature_fraction': 0.8,
+            'verbosity': -1,
+            'seed': 42
+        }
+        
+        ds = lgb.Dataset(X, label=y)
+        self.model = lgb.train(params, ds, num_boost_round=200)
+            
+    def predict_regime_probabilities(self, features_df: pd.DataFrame, symbol: str, t: int) -> np.ndarray:
+        """Predict regime probability vector at time t."""
+        if self.model is None:
+            return np.ones(len(MarketRegime)) / len(MarketRegime)
+        
+        rf = self.extract_regime_features(features_df, symbol, t)
+        X = pd.DataFrame([rf])[self.feature_cols].fillna(0)
+        
+        probs = self.model.predict(X)[0]
+        return probs
+
+
+# ============================================================================
+# TRIPLE BARRIER LABELING
+# ============================================================================
+
+@dataclass
+class BarrierLabel:
+    """Triple barrier label for a single trade."""
+    outcome: BarrierOutcome
+    bars_to_hit: int
+    return_at_hit: float
+    horizon: int
+
+
+class TripleBarrierLabeler:
+    """Label trades using triple-barrier method."""
+    
+    def __init__(self, config: POMDPConfig):
+        self.config = config
+        
+    def compute_barriers(
+        self,
+        prices: pd.Series,
+        t: int,
+        horizon: int,
+        action: str
+    ) -> Tuple[float, float]:
+        """Compute TP and SL barriers in return space."""
+
+        # --- FORCE prices to be Series ---
+        if isinstance(prices, pd.DataFrame):
+            prices = prices.iloc[:, 0]
+
+        returns = prices.pct_change()
+
+        vol_slice = returns.iloc[max(0, t - self.config.VOL_WINDOW):t]
+
+        # --- FORCE scalar volatility ---
+        vol = float(vol_slice.std()) if len(vol_slice) > 0 else np.nan
+
+        if not np.isfinite(vol) or vol < 1e-6:
+            vol = 0.02  # conservative fallback
+
+        tp_threshold = self.config.TP_MULTIPLIER * vol
+        sl_threshold = -self.config.SL_MULTIPLIER * vol
+
+        if action == "SELL":
+            tp_threshold = -tp_threshold
+            sl_threshold = -sl_threshold
+
+        return tp_threshold, sl_threshold
+
+    def label_single_trade(
+    self,
+    prices: pd.Series | pd.DataFrame,
+    t: int,
+    action: str,
+    horizon: int
+) -> BarrierLabel:
+        """Label a single trade with triple barrier."""
+
+        # --- FORCE prices to Series ---
+        if isinstance(prices, pd.DataFrame):
+            prices = prices.iloc[:, 0]
+            
+        if action not in ["BUY", "SELL"]:
+            return BarrierLabel(BarrierOutcome.TIMEOUT, horizon, 0.0, horizon)
+        
+        tp_threshold, sl_threshold = self.compute_barriers(prices, t, horizon, action)
+        entry_price = prices.iloc[t]
+        
+        # Scan forward to find first barrier hit
+        for i in range(1, horizon + 1):
+            if t + i >= len(prices):
+                final_return = (prices.iloc[-1] / entry_price - 1)
+                if action == "SELL":
+                    final_return = -final_return
+                return BarrierLabel(BarrierOutcome.TIMEOUT, i, final_return, horizon)
+            
+            current_price = prices.iloc[t + i]
+            ret = (current_price / entry_price - 1)
+            
+            if action == "SELL":
+                ret = -ret
+
+            ret = float(ret)
+            
+            if ret >= tp_threshold:
+                return BarrierLabel(BarrierOutcome.TAKE_PROFIT, i, ret, horizon)
+            elif ret <= sl_threshold:
+                return BarrierLabel(BarrierOutcome.STOP_LOSS, i, ret, horizon)
+        
+        # Timeout
+        final_return = (prices.iloc[t + horizon] / entry_price - 1)
+        if action == "SELL":
+            final_return = -final_return
+        return BarrierLabel(BarrierOutcome.TIMEOUT, horizon, final_return, horizon)
+    
+    def label_dataset(self, prices: pd.Series, features_df: pd.DataFrame, 
+                      symbol: str, action: str, min_t: int = 0) -> pd.DataFrame:
+        """Create labeled dataset for training."""
+        labels_list = []
+        max_horizon = max(self.config.HORIZONS)
+        
+        for t in range(min_t, len(prices) - max_horizon):
+            row = {'t': t}
+            
+            # Add features
+            state_cols = [c for c in features_df.columns if c.startswith(f"{symbol}_")]
+            for col in state_cols:
+                row[col] = features_df[col].iloc[t]
+            
+            # Label for each horizon
+            for h in self.config.HORIZONS:
+                label = self.label_single_trade(prices, t, action, h)
+                row[f'outcome_h{h}'] = label.outcome.value
+                row[f'return_h{h}'] = label.return_at_hit
+                row[f'bars_to_hit_h{h}'] = label.bars_to_hit
+            
+            labels_list.append(row)
+        
+        return pd.DataFrame(labels_list)
+
+
+# ============================================================================
+# BARRIER PROBABILITY MODELS
+# ============================================================================
+
+class BarrierProbabilityModels:
+    """Train calibrated probability models for barrier outcomes."""
+    
+    def __init__(self, config: POMDPConfig):
+        self.config = config
+        self.models: Dict[Tuple[str, int, str], lgb.Booster] = {}
+        self.feature_cols: List[str] = []
+    
+    def train_horizon_model(self, labeled_data: pd.DataFrame, horizon: int, action: str):
+        """Train models for a specific (action, horizon) pair."""
+        outcome_col = f'outcome_h{horizon}'
+        
+        feature_cols = [c for c in labeled_data.columns 
+                        if not c.startswith('outcome_') 
+                        and not c.startswith('return_')
+                        and not c.startswith('bars_to_hit_')
+                        and c != 't']
+        
+        X = labeled_data[feature_cols].fillna(0)
+        y = labeled_data[outcome_col]
+        
+        if len(X) < self.config.MIN_SAMPLES_PER_MODEL:
+            print(f"Insufficient data for {action} h={horizon}: {len(X)} samples")
+            return
+        
+        if not self.feature_cols:
+            self.feature_cols = feature_cols
+        
+        # Train TP classifier
+        y_tp = (y == BarrierOutcome.TAKE_PROFIT.value).astype(int)
+        
+        params = {
+            'objective': 'binary',
+            'metric': 'binary_logloss',
+            'max_depth': self.config.MAX_DEPTH,
+            'learning_rate': 0.03,
+            'feature_fraction': 0.7,
+            'bagging_fraction': 0.8,
+            'bagging_freq': 5,
+            'verbosity': -1,
+            'seed': 42
+        }
+        
+        ds_tp = lgb.Dataset(X, label=y_tp)
+        model_tp = lgb.train(params, ds_tp, num_boost_round=self.config.N_ESTIMATORS)
+        
+        # Train SL classifier
+        y_sl = (y == BarrierOutcome.STOP_LOSS.value).astype(int)
+        ds_sl = lgb.Dataset(X, label=y_sl)
+        model_sl = lgb.train(params, ds_sl, num_boost_round=self.config.N_ESTIMATORS)
+        
+        self.models[(action, horizon, 'TP')] = model_tp
+        self.models[(action, horizon, 'SL')] = model_sl
+        
+        pred_tp = model_tp.predict(X) > 0.5
+        pred_sl = model_sl.predict(X) > 0.5
+        acc_tp = (pred_tp == y_tp).mean()
+        acc_sl = (pred_sl == y_sl).mean()
+    
+    def predict_probabilities(self, state: pd.DataFrame, action: str, horizon: int) -> Tuple[float, float]:
+        """Predict P(TP) and P(SL) for given state, action, horizon."""
+        key_tp = (action, horizon, 'TP')
+        key_sl = (action, horizon, 'SL')
+        
+        if key_tp not in self.models or key_sl not in self.models:
+            return 0.33, 0.33
+        
+        X = state[self.feature_cols].fillna(0)
+        
+        p_tp = self.models[key_tp].predict(X)[0]
+        p_sl = self.models[key_sl].predict(X)[0]
+        
+        # Ensure probabilities sum <= 1
+        total = p_tp + p_sl
+        if total > 1.0:
+            p_tp /= total
+            p_sl /= total
+        
+        return p_tp, p_sl
+
+
+# ============================================================================
+# BELIEF STATE CONSTRUCTION
+# ============================================================================
+
+@dataclass
+class BeliefState:
+    """Complete belief state representation."""
+    features: np.ndarray
+    regime_probs: np.ndarray
+    position: float
+    volatility: float
+    regime_entropy: float
+    t: int
+
+
+class BeliefStateConstructor:
+    """Build belief states from observations."""
+    
+    def __init__(self, regime_module: RegimeInferenceModule, config: POMDPConfig):
+        self.regime_module = regime_module
+        self.config = config
+    
+    def construct(self, features_df: pd.DataFrame, symbol: str, t: int, 
+                  position: float, prices: pd.Series) -> BeliefState:
+        """Construct belief state at time t (no forward-looking)."""
+        state_cols = [c for c in features_df.columns if c.startswith(f"{symbol}_")]
+        feature_vec = features_df[state_cols].iloc[t].fillna(0).values
+        
+        regime_probs = self.regime_module.predict_regime_probabilities(features_df, symbol, t)
+        entropy = -np.sum(regime_probs * np.log(regime_probs + 1e-9))
+        
+        # --- FIX: Ensure prices is a simple Series, not a DataFrame ---
+        if isinstance(prices, pd.DataFrame):
+            prices = prices.squeeze()  # Converts single-column DF to Series
+
+        returns = prices.pct_change()
+        vol_calc = returns.iloc[max(0, t - self.config.VOL_WINDOW):t].std()
+        
+        # --- FIX: Handle if vol_calc is still a generic Series/Object ---
+        if isinstance(vol_calc, (pd.Series, np.ndarray)):
+            # If it's a series, extract the single value
+            vol_calc = vol_calc.item() if not vol_calc.empty else np.nan
+            
+        # Safe float conversion
+        try:
+            vol = float(vol_calc)
+        except (ValueError, TypeError):
+            vol = np.nan
+            
+        if np.isnan(vol) or vol < 1e-9:
+            vol = 0.02
+        
+        return BeliefState(
+            features=feature_vec,
+            regime_probs=regime_probs,
+            position=position,
+            volatility=vol,
+            regime_entropy=entropy,
+            t=t
         )
-        
-        model.fit(X, y)
-        
-        # Get feature importances
-        importance = pd.DataFrame({
-            'feature': X.columns,
-            'importance': model.feature_importances_
-        }).sort_values('importance', ascending=False)
-        
-        # Select top features
-        self.selected_features = importance.head(self.max_features)['feature'].tolist()
-        
-        return self.selected_features
+
+
+# ============================================================================
+# EXPECTED VALUE POLICY
+# ============================================================================
+
+class ExpectedValuePolicy:
+    """Select actions via expected payoff with uncertainty bonuses."""
     
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Filter to selected features."""
-        if self.selected_features is None:
-            raise ValueError("Must call fit() first")
-        return X[self.selected_features]
+    def __init__(self, prob_models: BarrierProbabilityModels, config: POMDPConfig):
+        self.prob_models = prob_models
+        self.config = config
+    
+    def compute_expected_value(self, belief: BeliefState, action: str, 
+                                features_df: pd.DataFrame, symbol: str) -> Tuple[float, float]:
+        """Compute expected value and confidence for an action."""
+        if action not in ["BUY", "SELL"]:
+            return 0.0, 1.0
+        
+        state_cols = [c for c in features_df.columns if c.startswith(f"{symbol}_")]
+        state_df = features_df[state_cols].iloc[[belief.t]]
+        
+        ev_total = 0.0
+        
+        for horizon in self.config.HORIZONS:
+            p_tp, p_sl = self.prob_models.predict_probabilities(state_df, action, horizon)
+            
+            reward_tp = belief.volatility * self.config.TP_MULTIPLIER
+            reward_sl = belief.volatility * self.config.SL_MULTIPLIER
+            
+            ev_horizon = p_tp * reward_tp - p_sl * reward_sl
+            weight = self.config.HORIZON_WEIGHTS.get(horizon, 0.0)
+            ev_total += weight * ev_horizon
+        
+        ev_total -= self.config.COST_PER_TRADE
+        entropy_penalty = self.config.REGIME_WEIGHT_DECAY * belief.regime_entropy
+        ev_total -= entropy_penalty
+        
+        confidence = 1.0 / (1.0 + belief.regime_entropy)
+        
+        return ev_total, confidence
+    
+    def select_action(self, belief: BeliefState, features_df: pd.DataFrame, 
+                      symbol: str, exploration: float = 0.0) -> Tuple[str, float]:
+        """Select action using UCB."""
+        actions = ["BUY", "SELL", "HOLD", "FLATTEN"]
+        
+        ev_scores = {}
+        confidence_scores = {}
+        
+        for action in actions:
+            ev, conf = self.compute_expected_value(belief, action, features_df, symbol)
+            ucb_bonus = exploration * (1.0 - conf)
+            ev_scores[action] = ev + ucb_bonus
+            confidence_scores[action] = conf
+        
+        best_action = max(ev_scores, key=ev_scores.get)
+        return best_action, confidence_scores[best_action]
 
 
 # ============================================================================
-# NO FORWARD-LOOKING BIAS: REWARD FROM PAST EXPERIENCE
+# POMDP EXPERIENCE BUFFER
 # ============================================================================
 
-class ExperienceBuffer:
-    """Store past (state, action, reward, next_state) transitions."""
+@dataclass
+class POMDPExperience:
+    """Experience tuple for POMDP learning."""
+    features: np.ndarray
+    regime_probs: np.ndarray
+    action: str
+    position: float
+    volatility: float
+    barrier_outcomes: Dict[int, BarrierLabel]
+    costs: float
+    t: int
+
+
+class POMDPExperienceBuffer:
+    """Store POMDP experiences for training."""
     
     def __init__(self, max_size: int = 10000):
-        self.buffer = []
+        self.buffer: List[POMDPExperience] = []
         self.max_size = max_size
     
-    def add(self, state: np.ndarray, action: str, position: float, 
-            reward: float, next_state: np.ndarray, feature_names: List[str] = None):
-        """Add experience tuple."""
-        self.buffer.append({
-            'state': state,
-            'action': action,
-            'position': position,
-            'reward': reward,
-            'next_state': next_state,
-            'feature_names': feature_names
-        })
-        
+    def add(self, experience: POMDPExperience):
+        self.buffer.append(experience)
         if len(self.buffer) > self.max_size:
             self.buffer.pop(0)
     
-    def sample(self, n: int) -> List[Dict]:
-        """Sample random experiences."""
-        indices = np.random.choice(len(self.buffer), min(n, len(self.buffer)), replace=False)
-        return [self.buffer[i] for i in indices]
-    
-    def get_all(self) -> List[Dict]:
-        """Get all experiences."""
+    def get_all(self) -> List[POMDPExperience]:
         return self.buffer
-
-
-# ============================================================================
-# ACTION SIMULATOR WITH CONTINUOUS POSITIONS
-# ============================================================================
-
-class ActionSimulator:
-    """Execute trades with realistic costs and continuous position sizing."""
     
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-    
-    def execute_action(
-        self, 
-        equity: float,
-        current_position: float,
-        action: str,
-        volatility: float,
-        confidence: float = 0.5
-    ) -> Tuple[float, float]:
-        """Execute an action and return new equity and position."""
-        
-        if action == "HOLD":
-            target_position = current_position
-        
-        elif action == "FLATTEN":
-            target_position = 0.0
-        
-        elif action == "BUY":
-            vol_scale = np.clip(0.02 / (volatility + 1e-9), 0.1, 2.0)
-            target_position = confidence * vol_scale
-            target_position = np.clip(target_position, 1e-9, 1 - 1e-9)
-        
-        elif action == "SELL":
-            vol_scale = np.clip(0.02 / (volatility + 1e-9), 0.1, 2.0)
-            target_position = -confidence * vol_scale
-            target_position = np.clip(target_position, -1 + 1e-9, -1e-9)
-        
-        else:
-            raise ValueError(f"Unknown action: {action}")
-        
-        # Calculate trade cost
-        trade_size_pct = abs(target_position - current_position)
-        cost_amount = 0.0
-        
-        if trade_size_pct > 0.001: # Filter tiny noise trades
-            # Calculate cost in percentage of equity
-            slippage = (self.cfg.SLIPPAGE_BPS / 10000) * trade_size_pct
-            fees = (self.cfg.FEE_PCT * trade_size_pct) + (self.cfg.FEE_FIXED / equity)
-            penalty = self.cfg.TRADE_PENALTY * trade_size_pct
-            
-            total_cost_pct = slippage + fees + penalty
-            cost_amount = total_cost_pct
-            
-            equity *= (1.0 - total_cost_pct)
-        
-        return equity, target_position, cost_amount
+    def __len__(self) -> int:
+        return len(self.buffer)
 
 
 # ============================================================================
-# PORTFOLIO ALLOCATOR
+# WALK-FORWARD BACKTEST
 # ============================================================================
 
-class PortfolioAllocator:
-    """Normalize positions so sum of |positions| = leverage target."""
-    
-    def __init__(self, leverage: float = 1.0):
-        self.leverage = leverage
-    
-    def allocate(self, raw_positions: Dict[str, float]) -> Dict[str, float]:
-        """Normalize positions to meet leverage constraint."""
-        total_abs = sum(abs(p) for p in raw_positions.values())
-        
-        if total_abs < 1e-6:
-            return {s: 0.0 for s in raw_positions}
-        
-        scale = self.leverage / total_abs
-        return {s: p * scale for s, p in raw_positions.items()}
-
-
-# ============================================================================
-# ENSEMBLE MODEL WITH UNCERTAINTY QUANTIFICATION
-# ============================================================================
-
-class EnsembleQModel:
-    """Ensemble of LightGBM models for Q-value estimation with uncertainty."""
-    
-    def __init__(self, cfg: Config, n_models: int = 5):
-        self.cfg = cfg
-        self.n_models = n_models
-        self.models = {action: [] for action in ["BUY", "SELL", "HOLD", "FLATTEN"]}
-        self.features = None
-    
-    def train(self, experiences: List[Dict], feature_selector: Optional[FeatureSelector] = None):
-        """Train ensemble models on experience replay buffer."""
-        
-        # Convert experiences to training data
-        states = []
-        actions_taken = []
-        rewards = []
-        feature_names = None
-        
-        for exp in experiences:
-            states.append(exp['state'])
-            actions_taken.append(exp['action'])
-            rewards.append(exp['reward'])
-            if feature_names is None and 'feature_names' in exp:
-                feature_names = exp['feature_names']
-        
-        # Create DataFrame with proper column names
-        X = pd.DataFrame(states, columns=feature_names)
-        
-        # Feature selection
-        if feature_selector and self.cfg.FEATURE_SELECTION and len(X) > 100:
-            feature_selector.fit(X, pd.Series(rewards))
-            X = feature_selector.transform(X)
-        
-        self.features = X.columns.tolist()
-        
-        # Train separate ensemble for each action
-        for action in self.models.keys():
-            action_mask = np.array(actions_taken) == action
-            if action_mask.sum() < 10:
-                print(f"    ⚠️  {action}: Only {action_mask.sum()} samples, skipping")
-                continue
-            
-            X_action = X[action_mask]
-            y_action = np.array(rewards)[action_mask]
-            
-            # Train ensemble
-            for i in range(self.n_models):
-                # Bootstrap sample
-                indices = np.random.choice(len(X_action), len(X_action), replace=True)
-                X_boot = X_action.iloc[indices]
-                y_boot = y_action[indices]
-                
-                # Time-based split
-                split_idx = int(len(X_boot) * 0.9)
-                X_train, X_val = X_boot.iloc[:split_idx], X_boot.iloc[split_idx:]
-                y_train, y_val = y_boot[:split_idx], y_boot[split_idx:]
-                
-                if len(X_val) < 2:
-                    X_train, X_val = X_boot, X_boot
-                    y_train, y_val = y_boot, y_boot
-                
-                ds_train = lgb.Dataset(X_train, y_train)
-                ds_val = lgb.Dataset(X_val, y_val, reference=ds_train)
-                
-                params = {
-                    "objective": "regression",
-                    "metric": "l2",
-                    "max_depth": self.cfg.MAX_DEPTH,
-                    "num_leaves": self.cfg.NUM_LEAVES,
-                    "learning_rate": self.cfg.LEARNING_RATE,
-                    "feature_fraction": 0.4,
-                    "bagging_fraction": 0.6,
-                    "bagging_freq": 1,
-                    "seed": 42 + i,
-                    "verbosity": -1,
-                }
-                
-                model = lgb.train(
-                    params,
-                    ds_train,
-                    valid_sets=[ds_val],
-                    num_boost_round=self.cfg.NUM_ROUNDS,
-                    callbacks=[
-                        lgb.early_stopping(stopping_rounds=50, verbose=False),
-                        lgb.log_evaluation(period=0)
-                    ]
-                )
-                
-                self.models[action].append(model)
-                
-    def predict(self, state: pd.DataFrame) -> Tuple[Dict[str, float], Dict[str, float]]:
-        """Predict Q-values and uncertainties for all actions."""
-        # Ensure state has the same features used during training
-        if not all(f in state.columns for f in self.features):
-            missing = [f for f in self.features if f not in state.columns]
-            raise ValueError(f"Missing features: {missing[:5]}...")
-        
-        X = state[self.features]
-        
-        q_values = {}
-        uncertainties = {}
-        
-        for action, models in self.models.items():
-            if len(models) == 0:
-                q_values[action] = 0.0
-                uncertainties[action] = 1.0
-                continue
-            
-            predictions = [m.predict(X)[0] for m in models]
-            q_values[action] = np.mean(predictions)
-            uncertainties[action] = np.std(predictions)
-        
-        return q_values, uncertainties
-    
-    def act(self, state: pd.DataFrame, exploration: float = 0.0) -> Tuple[str, float]:
-        """Select action using Upper Confidence Bound (UCB)."""
-        q_values, uncertainties = self.predict(state)
-        
-        # UCB: Q(s,a) + c * uncertainty(s,a)
-        ucb_values = {
-            a: q_values[a] + exploration * uncertainties[a]
-            for a in q_values
-        }
-        
-        best_action = max(ucb_values, key=ucb_values.get)
-        
-        # Confidence based on Q-value spread
-        q_range = max(q_values.values()) - min(q_values.values())
-        
-        if q_range < 1e-6:
-            confidence = 0.5
-        else:
-            confidence = np.clip(
-                (q_values[best_action] - min(q_values.values())) / (q_range + 1e-9),
-                0.1, 1.0  # FIX: Set minimum confidence to 0.1
-            )
-        
-        return best_action, confidence
-
-
-# ============================================================================
-# WALK-FORWARD BACKTEST WITH EXPERIENCE REPLAY
-# ============================================================================
-
-def walk_forward_backtest(
-    features: pd.DataFrame,
-    prices: Dict[str, pd.Series],
-    cfg: Config,
+def pomdp_walk_forward_backtest(
+    features_df: pd.DataFrame,
+    prices_dict: Dict[str, pd.Series],
+    symbols: List[str],
+    config: POMDPConfig
 ) -> Dict:
-    """Walk-forward backtest with NO forward-looking bias."""
+    """Complete POMDP-based walk-forward backtest."""
     
-    symbols = list(prices.keys())
+    print("POMDP WALK-FORWARD BACKTEST")
+    
+    # Initialize
     equity = 100000.0
     positions = {s: 0.0 for s in symbols}
-    
-    # History tracking
     equity_history = [equity]
     position_history = [{s: 0.0 for s in symbols}]
     
-    # Experience buffers
-    buffers = {s: ExperienceBuffer(max_size=5000) for s in symbols}
+    # Initialize modules per symbol
+    regime_modules = {s: RegimeInferenceModule(config) for s in symbols}
+    barrier_labelers = {s: TripleBarrierLabeler(config) for s in symbols}
+    prob_models = {s: BarrierProbabilityModels(config) for s in symbols}
+    belief_constructors = {s: BeliefStateConstructor(regime_modules[s], config) for s in symbols}
+    policies = {s: ExpectedValuePolicy(prob_models[s], config) for s in symbols}
+    experience_buffers = {s: POMDPExperienceBuffer(config.MAX_BUFFER_SIZE) for s in symbols}
     
-    # Models
-    models = {s: None for s in symbols}
+    max_horizon = max(config.HORIZONS)
+    min_t = config.MIN_TRAIN_BARS
+    max_t = len(features_df) - max_horizon - 1
     
-    # Simulators and allocators
-    simulators = {s: ActionSimulator(cfg) for s in symbols}
-    allocator = PortfolioAllocator(cfg.PORTFOLIO_LEVERAGE)
+    models_trained = False
     
-    # Feature selector
-    feature_selector = FeatureSelector(cfg.MAX_FEATURES) if cfg.FEATURE_SELECTION else None
-    
-    min_t = cfg.MIN_TRAIN_DAYS
-    
-    print(f"\n🚀 Starting backtest from t={min_t} to t={len(features)-1}")
-    print(f"   Initial equity: ${equity:.2f}\n")
-    
-    total_fees_paid = 0.0
-    has_reset_equity = False
-
-    for t in range(min_t, len(features) - 1):
+    # Walk-forward loop
+    for t in range(min_t, max_t):
         
         if equity <= 0:
-            print(f"💀 BANKRUPT at t={t}")
+            print(f"\nBANKRUPT at t={t}")
             break
-        # === RETRAIN MODELS ===
-        if (t - min_t) % cfg.RETRAIN_FREQ == 0:
+        
+        # Retrain phase
+        if (t - min_t) % config.RETRAIN_FREQUENCY == 0:
             
             for symbol in symbols:
-                experiences = buffers[symbol].get_all()
+                # Train regime model
+                regime_modules[symbol].train(features_df.iloc[:t], symbol)
                 
-                if len(experiences) < 50:
-                    continue
-                
-                model = EnsembleQModel(cfg, n_models=cfg.NUM_MODELS)
-                model.train(experiences, feature_selector)
-                models[symbol] = model
-    
-            if not has_reset_equity and models[symbols[0]] is not None:
-                print(f"  ✨ Warm-up complete. Resetting Equity from ${equity:.2f} to $100,000.00")
-                has_reset_equity = True
-                
-                # Optional: Clear history so the chart starts fresh
+                # Create labeled datasets and train probability models
+                for action in ["BUY", "SELL"]:
+                    labeled_data = barrier_labelers[symbol].label_dataset(
+                        prices_dict[symbol],
+                        features_df,
+                        symbol,
+                        action,
+                        min_t=max(0, t - 504)
+                    )
+                    
+                    if len(labeled_data) < config.MIN_SAMPLES_PER_MODEL:
+                        print(f" Only {len(labeled_data)} samples, skipping")
+                        continue
+                    
+                    for horizon in config.HORIZONS:
+                        prob_models[symbol].train_horizon_model(labeled_data, horizon, action)
+            
+            models_trained = True
+            
+            if not models_trained and t == min_t + config.RETRAIN_FREQUENCY:
+                print(f"\n Warm-up complete. Resetting equity to $100,000")
                 equity = 100000.0
                 positions = {s: 0.0 for s in symbols}
-                
-                # History tracking
                 equity_history = [equity]
                 position_history = [{s: 0.0 for s in symbols}]
         
-        # === PREDICT ACTIONS FOR EACH SYMBOL ===
-        raw_positions = {}
-        chosen_actions = {}
-        step_costs = {}
-
+        # Prediction & action phase
+        actions_taken = {}
+        new_positions = {}
+        confidences = {}
+        beliefs = {}
+        
         for symbol in symbols:
-            # Get state features
-            state_cols = [c for c in features.columns if c.startswith(f"{symbol}_")]
-            state = features.iloc[[t]][state_cols].copy()
-            state[f"{symbol}_position"] = positions[symbol]
+            belief = belief_constructors[symbol].construct(
+                features_df, symbol, t, positions[symbol], prices_dict[symbol]
+            )
+            beliefs[symbol] = belief
             
-            # Calculate recent volatility
-            recent_returns = prices[symbol].iloc[max(0, t-21):t].pct_change()
-            volatility = recent_returns.std() if len(recent_returns) > 0 else 0.02
-            
-            if models[symbol] is None:
-                # Initial exploration / Warm-up
+            if not models_trained:
                 action = np.random.choice(["BUY", "SELL", "HOLD", "FLATTEN"])
-                confidence = 0.5  # Fixed confidence for warm-up
-                
-                equity, new_position, cost = simulators[symbol].execute_action(
-                    equity, positions[symbol], action, volatility, confidence
+                confidence = 0.5
+            else:
+                exploration = max(0.1, 1.0 - (t - min_t) / (max_t - min_t))
+                action, confidence = policies[symbol].select_action(
+                    belief, features_df, symbol, exploration
                 )
-                
-                raw_positions[symbol] = new_position
-                chosen_actions[symbol] = action
-                step_costs[symbol] = cost
-                continue
             
-            # Predict action
-            exploration = max(0.1, 1.0 - (t - min_t) / (len(features) - min_t))
-            action, confidence = models[symbol].act(state, exploration=exploration)
+            actions_taken[symbol] = action
+            confidences[symbol] = confidence
             
-            # Execute action
-            equity, new_position, cost = simulators[symbol].execute_action(
-                equity, positions[symbol], action, volatility, confidence
-            )
-            
-            raw_positions[symbol] = new_position
-            chosen_actions[symbol] = action
-            step_costs[symbol] = cost
+            # Convert action to position
+            if action == "HOLD":
+                new_positions[symbol] = positions[symbol]
+            elif action == "FLATTEN":
+                new_positions[symbol] = 0.0
+            elif action == "BUY":
+                vol_scale = np.clip(0.02 / (belief.volatility + 1e-9), 0.1, 2.0)
+                new_positions[symbol] = confidence * vol_scale * 0.5
+                new_positions[symbol] = np.clip(new_positions[symbol], 0, 1)
+            elif action == "SELL":
+                vol_scale = np.clip(0.02 / (belief.volatility + 1e-9), 0.1, 2.0)
+                new_positions[symbol] = -confidence * vol_scale * 0.5
+                new_positions[symbol] = np.clip(new_positions[symbol], -1, 0)
         
-        # === PORTFOLIO ALLOCATION ===
-        positions = allocator.allocate(raw_positions)
-
-        active_weights = [abs(p) for p in positions.values()]
-        total_exposure = sum(active_weights)
+        # Normalize positions
+        total_abs = sum(abs(p) for p in new_positions.values())
+        if total_abs > config.PORTFOLIO_LEVERAGE:
+            scale = config.PORTFOLIO_LEVERAGE / total_abs
+            new_positions = {s: p * scale for s, p in new_positions.items()}
         
-        if total_exposure > 1e-6:
-            # Normalize to 1.0 for HHI calc (in case leverage != 1)
-            norm_weights = [w / total_exposure for w in active_weights]
-            hhi = sum(w**2 for w in norm_weights)
-        else:
-            hhi = 0.0 # No penalty if we aren't holding anything
-        
-        # === COMPUTE REALIZED RETURNS AND STORE EXPERIENCES ===
-        next_t = t + 1
-        total_step_pnl  = 0.0
-        
+        # Compute transaction costs
+        total_costs = 0.0
         for symbol in symbols:
-            # 1. Price Return
-            price_return = prices[symbol].iloc[next_t] / prices[symbol].iloc[t] - 1
-            
-            # 2. Position PnL
-            gross_pnl = price_return * positions[symbol]
-            
-            # 3. Shorting Costs
-            if positions[symbol] < 0:
-                gross_pnl -= cfg.SHORT_COST_ANNUAL / 252 * abs(positions[symbol])
-            
-            # 4. Transaction Costs (The missing link!)
-            # We subtract the cost we JUST paid to enter this position
-            net_pnl = gross_pnl - step_costs[symbol]
-            concentration_cost = cfg.CONCENTRATION_PENALTY * hhi * total_exposure
-
-            total_step_pnl += net_pnl
-            total_step_pnl -= concentration_cost
-            
-            # 5. Store Experience with NET Reward
-            # We scale reward by 100 to help the model see bigger numbers (basis points vs tiny decimals)
-            reward_scaled = net_pnl * 100 
-            
-            state_cols = [c for c in features.columns if c.startswith(f"{symbol}_")]
-            state = features.iloc[t][state_cols].values
-            next_state = features.iloc[next_t][state_cols].values
-            
-            buffers[symbol].add(
-                state=state,
-                action=chosen_actions[symbol],
-                position=positions[symbol],  
-                reward=reward_scaled,  # <--- FIX: Training on Net PnL
-                next_state=next_state,
-                feature_names=state_cols
-            )
+            trade_size = abs(new_positions[symbol] - positions[symbol])
+            if trade_size > 0.001:
+                cost_pct = config.COST_PER_TRADE * trade_size
+                total_costs += cost_pct
         
-        # Update Equity (Simple Compounding)
-        # Note: Transaction costs were already deducted from equity in execute_action,
-        # so here we just add the price PnL.
-        step_price_pnl = sum(
-            (prices[s].iloc[next_t] / prices[s].iloc[t] - 1) * positions[s] 
-            for s in symbols
-        )
-        equity *= (1 + step_price_pnl)
+        equity *= (1.0 - total_costs)
+        
+        # Compute realized PnL
+        total_pnl = 0.0
+        for symbol in symbols:
+            price_t = float(prices_dict[symbol].iloc[t])
+            price_t1 = float(prices_dict[symbol].iloc[t + 1])
+            
+            ret = (price_t1 / price_t - 1)
+            pnl = ret * positions[symbol]
+            total_pnl += pnl
+        
+        equity *= (1.0 + total_pnl)
+        positions = new_positions.copy()
         
         equity_history.append(equity)
         position_history.append(positions.copy())
+        
+        # Store experiences
+        if models_trained:
+            for symbol in symbols:
+                barrier_outcomes = {}
+                for horizon in config.HORIZONS:
+                    label = barrier_labelers[symbol].label_single_trade(
+                        prices_dict[symbol], t, actions_taken[symbol], horizon
+                    )
+                    barrier_outcomes[horizon] = label
+                
+                exp = POMDPExperience(
+                    features=beliefs[symbol].features,
+                    regime_probs=beliefs[symbol].regime_probs,
+                    action=actions_taken[symbol],
+                    position=positions[symbol],
+                    volatility=beliefs[symbol].volatility,
+                    barrier_outcomes=barrier_outcomes,
+                    costs=total_costs / len(symbols),
+                    t=t
+                )
+                experience_buffers[symbol].add(exp)
+        
+        print(f"\r{round((t - min_t) / (max_t - min_t) * 100, 2)}%", end="\r", flush=True)
     
-
-        print(f"  💰 Equity: ${equity:.2f} | Positions: {positions}")
+    # Final results
+    print("BACKTEST COMPLETE")
+    
+    final_equity = equity_history[-1]
+    total_return = (final_equity - 100000) / 100000
+    
+    equity_series = pd.Series(equity_history)
+    returns = equity_series.pct_change().dropna()
+    sharpe = np.sqrt(252) * returns.mean() / (returns.std() + 1e-9)
+    
+    running_max = equity_series.expanding().max()
+    drawdown = (equity_series / running_max - 1)
+    max_dd = drawdown.min()
+    
+    print(f"\nFinal Equity:    ${final_equity:>12,.2f}")
+    print(f"Total Return:    {total_return:>12.2%}")
+    print(f"Sharpe Ratio:    {sharpe:>12.2f}")
+    print(f"Max Drawdown:    {max_dd:>12.2%}")
+    print(f"\nExperience buffer sizes:")
+    for symbol in symbols:
+        print(f"  {symbol}: {len(experience_buffers[symbol])} experiences")
     
     return {
-        "equity": equity_history,
-        "positions": position_history,
-        "final_equity": equity_history[-1]
+        'equity': equity_history,
+        'positions': position_history,
+        'final_equity': final_equity,
+        'total_return': total_return,
+        'sharpe': sharpe,
+        'max_drawdown': max_dd,
+        'experiences': experience_buffers
     }
 
+# ============================================================================
+# VISUALIZATION
+# ============================================================================
+
+def plot_pomdp_performance(results: Dict, feature_index: pd.DatetimeIndex, min_t: int):
+    """
+    Plot equity curve, drawdown, and position history.
+    
+    Args:
+        results: Dictionary returned from backtest
+        feature_index: The full DatetimeIndex from features_df
+        min_t: The starting index of the backtest
+    """
+    print("\n📊 Generating performance plots...")
+    
+    # 1. Align Data with Dates
+    # The simulation runs from min_t to the end. 
+    # results['equity'] has one initial value, so we map it to min_t-1 to end
+    
+    # Slice the index to match the backtest duration
+    # We add 1 because equity history includes the starting state
+    sim_dates = feature_index[min_t : min_t + len(results['equity'])]
+    
+    # Handle potential length mismatch by trimming the longer one
+    min_len = min(len(sim_dates), len(results['equity']))
+    sim_dates = sim_dates[:min_len]
+    equity_curve = pd.Series(results['equity'][:min_len], index=sim_dates)
+    
+    # Positions alignment
+    pos_df = pd.DataFrame(results['positions'])
+    pos_df = pos_df.iloc[:min_len] # Ensure length matches
+    pos_df.index = sim_dates
+    
+    # 2. Calculate Drawdown
+    running_max = equity_curve.expanding().max()
+    drawdown = (equity_curve / running_max - 1)
+    
+    # 3. Create Plots
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1, 2]})
+    
+    # -- Panel 1: Equity --
+    ax1.plot(equity_curve, color='green', linewidth=1.5, label='Portfolio Equity')
+    ax1.set_title('POMDP Strategy Performance', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Equity ($)')
+    ax1.legend(loc='upper left')
+    ax1.grid(True, alpha=0.3)
+    
+    # -- Panel 2: Drawdown --
+    ax2.fill_between(drawdown.index, drawdown, 0, color='red', alpha=0.3)
+    ax2.plot(drawdown, color='red', linewidth=1)
+    ax2.set_ylabel('Drawdown (%)')
+    ax2.set_title('Risk Profile', fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    
+    # -- Panel 3: Positions --
+    for col in pos_df.columns:
+        ax3.plot(pos_df.index, pos_df[col], label=col, linewidth=1.5, alpha=0.8)
+    
+    ax3.set_ylabel('Position Size (Leverage)')
+    ax3.set_title('Asset Allocation', fontsize=10)
+    ax3.legend(loc='upper left')
+    ax3.grid(True, alpha=0.3)
+    ax3.axhline(0, color='black', linewidth=1, linestyle='--')
+    
+    # Formatting
+    plt.xlabel('Date')
+    
+    # Format x-axis dates
+    if len(sim_dates) > 0:
+        fig.autofmt_xdate()
+        
+    plt.tight_layout()
+    plt.show()
 
 # ============================================================================
-# MAIN
+# MAIN EXECUTION
 # ============================================================================
 
-def main():
-    cfg = Config(
-        SYMBOLS=["TEAM", "TKO", "DTE", "NFLX", "SPY", "^VIX"],
-        FEATURE_SELECTION=True,
-        MAX_FEATURES=50,
-        MIN_TRAIN_DAYS=100,  # Reduced for faster startup
-        RETRAIN_FREQ=21
-    )
+def main(config: POMDPConfig):
+    """Main execution function."""
+    
+    print("POMDP TRADING SYSTEM - PRODUCTION IMPLEMENTATION")
     
     # Load data
-    data = load_data(cfg.SYMBOLS, cfg.LOOKBACK_DAYS, cfg.INTERVAL)
+    print("\n[1/4] Loading market data...")
+    data_dict = load_data(config.SYMBOLS, config.LOOKBACK_DAYS, config.INTERVAL)
     
-    if data.empty:
-        print("❌ No data loaded!")
-        return
-    
-    # Build features
-    features = build_feature_matrix(data, cfg.SYMBOLS)
-    
-    if len(features) < cfg.MIN_TRAIN_DAYS + 10:
-        print(f"❌ Not enough data! Need {cfg.MIN_TRAIN_DAYS + 10}, got {len(features)}")
-        return
+    # Feature engineering
+    print("\n[2/4] Engineering features...")
+    features_df = build_feature_matrix(data_dict)
     
     # Extract prices
-    prices = {sym: data[("Close", sym)].loc[features.index] for sym in cfg.SYMBOLS}
+    prices_dict = {}
+    for symbol in config.SYMBOLS:
+        p = data_dict[symbol]['Close']
+        if isinstance(p, pd.DataFrame):
+            p = p.squeeze()
+        prices_dict[symbol] = p
+    
+    # Align indices
+    common_index = features_df.index
+    prices_dict = {s: prices_dict[s].loc[common_index] for s in config.SYMBOLS}
     
     # Run backtest
-    results = walk_forward_backtest(features, prices, cfg)
+    print("\n[3/4] Running POMDP backtest...")
+    results = pomdp_walk_forward_backtest(features_df, prices_dict, config.SYMBOLS, config)
     
-    print(f"\n{'='*60}")
-    print(f"🎯 FINAL RESULTS")
-    print(f"{'='*60}")
-    print(f"Final equity:  ${results['final_equity']:.2f}")
-    print(f"Total return:  {(results['final_equity'] - 100000) / 100000 * 100:+.1f}%")
-    print(f"{'='*60}\n")
+    print("\n[4/4] Analysis complete!")
+
+    plot_pomdp_performance(
+        results, 
+        features_df.index, 
+        min_t=config.MIN_TRAIN_BARS
+    )
+    
+    return results
 
 
 if __name__ == "__main__":
-    main()
+    results = main(config=POMDPConfig(
+        SYMBOLS=["SPY"],
+
+        LOOKBACK_DAYS=365,
+        INTERVAL="1d",
+        HORIZONS=[3, 5, 25],
+
+        TP_MULTIPLIER=2.0,
+        SL_MULTIPLIER=1.5,
+        VOL_WINDOW=10,
+
+        N_ESTIMATORS=10,
+        MAX_DEPTH=6,
+        MIN_TRAIN_BARS=45,
+        RETRAIN_FREQUENCY=20,
+
+        COST_PER_TRADE=0.001,
+        PORTFOLIO_LEVERAGE=1.0
+    ))
