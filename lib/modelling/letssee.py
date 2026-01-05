@@ -1,1128 +1,1204 @@
-import numpy as np
-import pandas as pd
-import lightgbm as lgb
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Dict, List, Any, Optional, Tuple, Callable, Union
 from enum import Enum
-import warnings
-import os
-import sys
-from datetime import datetime, timedelta, timezone
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-
-warnings.filterwarnings("ignore")
-
-# Import data loading utilities
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-
-try:
-    from lib.retrieval.yahoofinance import get_trading
-except ImportError:
-    print("⚠️  yahoofinance module not found. Will use synthetic data.")
-    get_trading = None
+import pandas as pd
+import numpy as np
+from datetime import datetime
 
 
 # ============================================================================
-# MARKET REGIME DEFINITIONS
+# CONFIGURATION SCHEMA
 # ============================================================================
 
-class MarketRegime(Enum):
-    """Hidden market states in the POMDP."""
-    LOW_VOL_TREND = 0
-    HIGH_VOL_TREND = 1
-    MEAN_REVERTING = 2
-    CRISIS = 3
-    NEUTRAL = 4
+class FeatureType(Enum):
+    """Feature classification."""
+    WEAK = "weak"        # Stateless transformations
+    STRONG = "strong"    # Stateful/model-driven
 
 
-class BarrierOutcome(Enum):
-    """Triple barrier outcomes."""
-    TAKE_PROFIT = 1
-    STOP_LOSS = -1
-    TIMEOUT = 0
+class TrainingMode(Enum):
+    """Training paradigm."""
+    SUPERVISED = "supervised"
+    REINFORCEMENT = "reinforcement"
+    ONLINE = "online"
+    BANDIT = "bandit"
+    HEURISTIC = "heuristic"
+
+
+class WindowType(Enum):
+    """Training window strategy."""
+    EXPANDING = "expanding"
+    ROLLING = "rolling"
+    ANCHORED = "anchored"
+
+
+@dataclass
+class DataSourceConfig:
+    """Defines a data source."""
+    name: str
+    source_type: str  # 'market', 'fundamental', 'alternative', 'synthetic'
+    symbols: List[str]
+    fields: List[str]  # ['Open', 'High', 'Low', 'Close', 'Volume']
+    interval: str  # '1d', '1h', '5m'
+    lookback_days: int
+    provider: str  # 'yahoo', 'polygon', 'synthetic'
+    params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class WeakFeatureConfig:
+    """Configuration for stateless feature."""
+    name: str
+    feature_type: str  # 'returns', 'volatility', 'technical', 'transform'
+    dependencies: List[str]  # Data sources or other features
+    params: Dict[str, Any] = field(default_factory=dict)
+    window_size: Optional[int] = None
+    symbols: Optional[List[str]] = None  # None = all symbols
+
+
+@dataclass
+class StrongFeatureConfig:
+    """Configuration for stateful/model-driven feature."""
+    name: str
+    feature_type: str  # 'regime', 'sentiment', 'volatility_model', 'embedding'
+    dependencies: List[str]  # Required features/data
+    model_type: str  # 'lgbm', 'nn', 'hmm', 'custom'
+    training_schedule: 'TrainingScheduleConfig'
+    params: Dict[str, Any] = field(default_factory=dict)
+    symbols: Optional[List[str]] = None
+
+
+@dataclass
+class TrainingScheduleConfig:
+    """Defines when and how to train."""
+    mode: TrainingMode
+    frequency: int  # Retrain every N bars
+    min_samples: int
+    window_type: WindowType
+    window_size: Optional[int] = None  # For rolling windows
+    validation_split: float = 0.2
+    warm_up_bars: int = 0
+    triggers: List[str] = field(default_factory=list)  # ['regime_change', 'vol_spike']
+
+
+@dataclass
+class ModelConfig:
+    """Model specification."""
+    name: str
+    model_type: str  # 'lgbm', 'nn', 'linear', 'rl_dqn', 'rl_ppo'
+    input_features: List[str]  # Feature names
+    output_schema: Dict[str, str]  # {'action': 'categorical', 'value': 'continuous'}
+    training_config: TrainingScheduleConfig
+    hyperparameters: Dict[str, Any] = field(default_factory=dict)
+    ensemble_config: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class PolicyConfig:
+    """Decision-making policy."""
+    name: str
+    policy_type: str  # 'greedy', 'epsilon_greedy', 'ucb', 'expected_value', 'rl_policy'
+    models: List[str]  # Model names to use
+    aggregation: str  # 'vote', 'weighted_avg', 'max_confidence'
+    risk_scaling: Dict[str, Any] = field(default_factory=dict)
+    params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PortfolioConfig:
+    """Portfolio management rules."""
+    initial_capital: float
+    max_leverage: float
+    position_limits: Dict[str, float]  # Per-symbol limits
+    diversification_constraints: Dict[str, Any]
+    cost_model: Dict[str, float]  # {'transaction': 0.001, 'slippage': 0.0005}
+    risk_limits: Dict[str, float]  # {'max_drawdown': 0.2, 'max_var': 0.05}
+
+
+@dataclass
+class ExecutorConfig:
+    """Execution configuration."""
+    executor_type: str  # 'backtest', 'paper', 'live'
+    venue: Optional[str] = None  # For live trading
+    order_type: str = 'market'
+    execution_params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class BacktestConfig:
+    """Backtest engine configuration."""
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    benchmark: Optional[str] = None
+    metrics: List[str] = field(default_factory=lambda: ['sharpe', 'max_dd', 'total_return'])
+    save_states: bool = True
+    introspection_level: str = 'full'  # 'minimal', 'standard', 'full'
+
+
+@dataclass
+class SystemConfig:
+    """Complete system specification - Single Source of Truth."""
+    
+    # System Identity
+    name: str
+    version: str
+    description: str
+    random_seed: int = 42
+    
+    # Data Pipeline
+    data_sources: List[DataSourceConfig] = field(default_factory=list)
+    
+    # Feature Pipeline (DAG)
+    weak_features: List[WeakFeatureConfig] = field(default_factory=list)
+    strong_features: List[StrongFeatureConfig] = field(default_factory=list)
+    
+    # Model Pipeline
+    models: List[ModelConfig] = field(default_factory=list)
+    
+    # Decision Pipeline
+    policies: List[PolicyConfig] = field(default_factory=list)
+    
+    # Execution Pipeline
+    portfolio: PortfolioConfig = None
+    executor: ExecutorConfig = None
+    
+    # Orchestration
+    backtest: BacktestConfig = None
+    
+    # Runtime
+    parallel: bool = False
+    cache_features: bool = True
+    cache_dir: Optional[str] = None
+    
+    def validate(self) -> List[str]:
+        """Validate configuration integrity."""
+        errors = []
+        
+        # Check feature DAG is acyclic
+        # Check all dependencies exist
+        # Check training schedules are compatible
+        # Check model inputs match feature outputs
+        
+        return errors
 
 
 # ============================================================================
-# CONFIGURATION
+# DATA LAYER
 # ============================================================================
 
 @dataclass
-class POMDPConfig:
-    """Configuration for POMDP trading system."""
-    
-    # Data
-    SYMBOLS: List[str] = None
-    LOOKBACK_DAYS: int = 730
-    INTERVAL: str = "1d"
-    
-    # Regime inference
-    REGIME_LOOKBACK: int = 63
-    
-    # Triple barrier
-    HORIZONS: List[int] = None
-    TP_MULTIPLIER: float = 2.0
-    SL_MULTIPLIER: float = 1.0
-    VOL_WINDOW: int = 21
-    
-    # Probability models
-    N_ESTIMATORS: int = 200
-    MAX_DEPTH: int = 4
-    MIN_SAMPLES_PER_MODEL: int = 100
-    
-    # Policy
-    HORIZON_WEIGHTS: Dict[int, float] = None
-    REGIME_WEIGHT_DECAY: float = 0.3
-    COST_PER_TRADE: float = 0.001
-    UCB_EXPLORATION: float = 1.0
-    
-    # Training
-    MIN_TRAIN_BARS: int = 150
-    RETRAIN_FREQUENCY: int = 21
-    MAX_BUFFER_SIZE: int = 5000
-    
-    # Portfolio
-    PORTFOLIO_LEVERAGE: float = 1.0
+class TimeSeriesData:
+    """Unified time-indexed data container."""
+    data: pd.DataFrame  # Columns: symbol_field (e.g., 'SPY_Close')
+    metadata: Dict[str, Any]
     
     def __post_init__(self):
-        if self.SYMBOLS is None:
-            self.SYMBOLS = ["SPY", "QQQ", "TLT"]
-        if self.HORIZONS is None:
-            self.HORIZONS = [5, 10, 21]
-        if self.HORIZON_WEIGHTS is None:
-            total = sum(self.HORIZONS)
-            self.HORIZON_WEIGHTS = {h: h/total for h in self.HORIZONS}
+        assert isinstance(self.data.index, pd.DatetimeIndex), "Index must be DatetimeIndex"
+        assert self.data.index.is_monotonic_increasing, "Index must be sorted"
 
 
-# ============================================================================
-# DATA LOADING
-# ============================================================================
-
-def load_data(symbols: List[str], days: int, interval: str) -> Dict[str, pd.DataFrame]:
-    """Load OHLCV data for multiple symbols."""
-    print(f"Loading data: {symbols}")
+class DataSource(ABC):
+    """Abstract data source interface."""
     
-    data_dict = {}
-    
-    if get_trading is not None:
-        for symbol in symbols:
-            try:
-                data = get_trading(symbol, days=days, interval=interval)
-                if not data.empty:
-                    data_dict[symbol] = data
-            except Exception as e:
-                print(f"Failed to load {symbol}: {e}")
-    
-    # Fallback to synthetic data if needed
-    if not data_dict:
-        print("  Using synthetic data")
-        dates = pd.date_range(end=pd.Timestamp.now(), periods=500, freq='D')
-        for symbol in symbols:
-            np.random.seed(hash(symbol) % 2**32)
-            prices = 100 * np.exp(np.cumsum(np.random.randn(500) * 0.01))
-            data_dict[symbol] = pd.DataFrame({
-                'Close': prices,
-                'Open': prices * (1 + np.random.randn(500) * 0.002),
-                'High': prices * (1 + np.abs(np.random.randn(500)) * 0.005),
-                'Low': prices * (1 - np.abs(np.random.randn(500)) * 0.005),
-                'Volume': np.random.randint(1e6, 1e7, 500)
-            }, index=dates)
-    
-    print(f"Loaded {len(data_dict)} symbols")
-    return data_dict
-
-
-# ============================================================================
-# FEATURE ENGINEERING
-# ============================================================================
-
-def engineer_features(data: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """Generate features for a single symbol."""
-    df = pd.DataFrame(index=data.index)
-    
-    close = data['Close']
-    high = data['High']
-    low = data['Low']
-    volume = data['Volume']
-    returns = close.pct_change()
-    
-    # Returns at multiple lags
-    for lag in [1, 2, 3, 5, 10, 21, 42, 63]:
-        df[f"ret_{lag}"] = close.pct_change(lag)
-    
-    # Acceleration
-    df["ret_accel_5"] = df["ret_5"] - df["ret_5"].shift(5)
-    df["ret_accel_21"] = df["ret_21"] - df["ret_21"].shift(21)
-    
-    # Volatility
-    for w in [5, 10, 21, 42, 63]:
-        df[f"vol_{w}"] = returns.rolling(w).std()
-        df[f"vol_rank_{w}"] = df[f"vol_{w}"].rolling(min(252, len(close))).rank(pct=True)
-    
-    # Parkinson volatility
-    for w in [5, 21]:
-        hl = np.log(high / low)
-        df[f"parkinson_vol_{w}"] = np.sqrt(hl.pow(2).rolling(w).mean() / (4 * np.log(2)))
-    
-    # Trend
-    for w in [10, 21, 50, 100, 200]:
-        sma = close.rolling(w).mean()
-        df[f"sma_{w}"] = sma
-        df[f"price_sma_{w}"] = close / sma - 1
-        df[f"sma_slope_{w}"] = (sma - sma.shift(5)) / sma.shift(5)
-    
-    # EMA
-    for w in [12, 26, 50]:
-        ema = close.ewm(span=w, adjust=False).mean()
-        df[f"price_ema_{w}"] = close / ema - 1
-    
-    # MACD
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    df["macd"] = ema12 - ema26
-    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-    df["macd_hist"] = df["macd"] - df["macd_signal"]
-    
-    # Mean reversion
-    for w in [10, 21, 42]:
-        mean = close.rolling(w).mean()
-        std = close.rolling(w).std()
-        df[f"zscore_{w}"] = (close - mean) / (std + 1e-9)
-        df[f"rsi_{w}"] = compute_rsi(close, w)
-    
-    # Bollinger Bands
-    for w in [20, 50]:
-        sma = close.rolling(w).mean()
-        std = close.rolling(w).std()
-        df[f"bb_upper_{w}"] = (close - (sma + 2*std)) / close
-        df[f"bb_lower_{w}"] = (close - (sma - 2*std)) / close
-    
-    # Volume
-    df["rel_vol"] = volume / volume.rolling(21).mean()
-    df["vol_trend"] = volume.rolling(21).mean() / volume.rolling(63).mean() - 1
-    
-    # Range & microstructure
-    df["range"] = (high - low) / close
-    df["range_rank"] = df["range"].rolling(min(252, len(close))).rank(pct=True)
-    df["gap"] = (close - close.shift(1)) / close.shift(1)
-    df["hl_position"] = (close - low) / (high - low + 1e-9)
-    
-    # Regime features
-    for w in [10, 21]:
-        df[f"trend_strength_{w}"] = abs(df[f"price_sma_{w}"])
-    
-    vol_21 = returns.rolling(21).std()
-    df["vol_regime"] = vol_21.rolling(min(252, len(close))).rank(pct=True)
-    
-    rolling_max = close.rolling(min(252, len(close)), min_periods=1).max()
-    df["drawdown"] = (close / rolling_max - 1)
-    
-    # Add symbol prefix
-    df.columns = [f"{symbol}_{c}" for c in df.columns]
-    
-    return df
-
-
-def compute_rsi(close: pd.Series, window: int) -> pd.Series:
-    """Compute RSI indicator."""
-    delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window).mean()
-    rs = gain / (loss + 1e-9)
-    return 100 - 100 / (1 + rs)
-
-
-def build_feature_matrix(data_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Build comprehensive feature matrix for all symbols."""
-    print("Engineering features...")
-    
-    feats = []
-    for symbol, data in data_dict.items():
-        feat = engineer_features(data, symbol)
-        feats.append(feat)
-    
-    combined = pd.concat(feats, axis=1)
-    combined = combined.ffill().fillna(0)
-    
-    return combined
-
-
-# ============================================================================
-# REGIME INFERENCE MODULE
-# ============================================================================
-
-class RegimeInferenceModule:
-    """Infer latent market regime from observable features."""
-    
-    def __init__(self, config: POMDPConfig):
+    def __init__(self, config: DataSourceConfig):
         self.config = config
-        self.model: Optional[lgb.Booster] = None
-        self.feature_cols: List[str] = []
+        self.name = config.name
+        
+    @abstractmethod
+    def load(self, start: Optional[datetime] = None, 
+             end: Optional[datetime] = None) -> TimeSeriesData:
+        """Load data for the configured time range."""
+        pass
     
-    def extract_regime_features(self, features_df: pd.DataFrame, symbol: str, t: int) -> pd.Series:
-        """Extract regime-relevant features at time t."""
-        regime_feats = {}
-        
-        # Volatility regime
-        vol_col = f"{symbol}_vol_21"
-        if vol_col in features_df.columns:
-            regime_feats['volatility'] = features_df[vol_col].iloc[t]
-            regime_feats['vol_rank'] = features_df[f"{symbol}_vol_rank_21"].iloc[t]
-        
-        # Drawdown
-        dd_col = f"{symbol}_drawdown"
-        if dd_col in features_df.columns:
-            regime_feats['drawdown'] = features_df[dd_col].iloc[t]
-        
-        # Trend strength
-        for w in [10, 21]:
-            ret_col = f"{symbol}_ret_{w}"
-            if ret_col in features_df.columns:
-                regime_feats[f'trend_strength_{w}'] = abs(features_df[ret_col].iloc[t])
-        
-        # Mean reversion signal
-        for w in [10, 21]:
-            z_col = f"{symbol}_zscore_{w}"
-            if z_col in features_df.columns:
-                regime_feats[f'zscore_{w}'] = abs(features_df[z_col].iloc[t])
-        
-        # Volume regime
-        vol_rel_col = f"{symbol}_rel_vol"
-        if vol_rel_col in features_df.columns:
-            regime_feats['volume_regime'] = features_df[vol_rel_col].iloc[t]
-        
-        # Range rank
-        range_col = f"{symbol}_range_rank"
-        if range_col in features_df.columns:
-            regime_feats['range_rank'] = features_df[range_col].iloc[t]
-        
-        return pd.Series(regime_feats)
+    @abstractmethod
+    def stream(self) -> TimeSeriesData:
+        """Stream the next data point (for live trading)."""
+        pass
     
-    def label_regimes(self, features_df: pd.DataFrame, symbol: str) -> pd.Series:
-        """Create regime labels from observable features using rules."""
-        labels = []
+    def validate_causality(self, data: TimeSeriesData, current_time: datetime) -> bool:
+        """Ensure no future data leakage."""
+        return data.data.index[-1] <= current_time
+
+
+class DataRegistry:
+    """Central registry for all data sources."""
+    
+    def __init__(self, configs: List[DataSourceConfig]):
+        self.sources: Dict[str, DataSource] = {}
+        self._build_sources(configs)
         
-        for t in range(len(features_df)):
-            rf = self.extract_regime_features(features_df, symbol, t)
-            
-            # 1. CRISIS (Crash Dynamics)
-            if rf.get('drawdown', 0) < -0.15 or rf.get('vol_rank', 0) > 0.90:
-                labels.append(MarketRegime.CRISIS.value)
-                
-            # 2. LOW VOLATILITY UPTREND (The "Grind Up")
-            # If Z-Score is high BUT volatility is low, this is a Bull Trend, not a top.
-            elif rf.get('zscore_21', 0) > 0.5 and rf.get('vol_rank', 0) < 0.4:
-                labels.append(MarketRegime.LOW_VOL_TREND.value)
-                
-            # 3. HIGH VOLATILITY TREND (Strong Momentum)
-            elif rf.get('trend_strength_21', 0) > 0.02 and rf.get('vol_rank', 0) > 0.6:
-                labels.append(MarketRegime.HIGH_VOL_TREND.value)
-                
-            # 4. MEAN REVERTING (Choppy / Overextended)
-            # Only label "Reversion" if we are EXTREMELY overextended (Z > 2.5) 
-            # OR if we are in neutral chop.
-            elif abs(rf.get('zscore_21', 0)) > 2.5:
-                 labels.append(MarketRegime.MEAN_REVERTING.value)
-                 
-            # 5. NEUTRAL
-            else:
-                labels.append(MarketRegime.NEUTRAL.value)
-        return labels
-        
-    def train(self, features_df: pd.DataFrame, symbol: str):
-        """Train regime classifier."""
-        X_list = []
-        for t in range(len(features_df)):
-            rf = self.extract_regime_features(features_df, symbol, t)
-            X_list.append(rf)
-        
-        X = pd.DataFrame(X_list).fillna(0)
-        y = self.label_regimes(features_df, symbol)
-        
-        self.feature_cols = X.columns.tolist()
-        
-        params = {
-            'objective': 'multiclass',
-            'num_class': len(MarketRegime),
-            'metric': 'multi_logloss',
-            'max_depth': 4,
-            'num_leaves': 16,
-            'learning_rate': 0.05,
-            'feature_fraction': 0.8,
-            'verbosity': -1,
-            'seed': 42
-        }
-        
-        ds = lgb.Dataset(X, label=y)
-        self.model = lgb.train(params, ds, num_boost_round=200)
-            
-    def predict_regime_probabilities(self, features_df: pd.DataFrame, symbol: str, t: int) -> np.ndarray:
-        """Predict regime probability vector at time t."""
-        if self.model is None:
-            return np.ones(len(MarketRegime)) / len(MarketRegime)
-        
-        rf = self.extract_regime_features(features_df, symbol, t)
-        X = pd.DataFrame([rf])[self.feature_cols].fillna(0)
-        
-        probs = self.model.predict(X)[0]
-        return probs
+    def _build_sources(self, configs: List[DataSourceConfig]):
+        """Instantiate data sources from configs."""
+        for config in configs:
+            source_class = self._get_source_class(config.source_type)
+            self.sources[config.name] = source_class(config)
+    
+    def _get_source_class(self, source_type: str) -> type:
+        """Factory for data sources."""
+        # Would map to concrete implementations
+        raise NotImplementedError
+    
+    def get(self, name: str) -> DataSource:
+        return self.sources[name]
+    
+    def load_all(self, start: datetime, end: datetime) -> Dict[str, TimeSeriesData]:
+        """Load all data sources."""
+        return {name: source.load(start, end) 
+                for name, source in self.sources.items()}
 
 
 # ============================================================================
-# TRIPLE BARRIER LABELING
+# FEATURE LAYER
 # ============================================================================
 
 @dataclass
-class BarrierLabel:
-    """Triple barrier label for a single trade."""
-    outcome: BarrierOutcome
-    bars_to_hit: int
-    return_at_hit: float
-    horizon: int
+class FeatureOutput:
+    """Output from a feature computation."""
+    data: pd.DataFrame  # Columns: feature_name
+    dependencies_used: List[str]
+    computation_time: float
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class TripleBarrierLabeler:
-    """Label trades using triple-barrier method."""
+class Feature(ABC):
+    """Base feature interface."""
     
-    def __init__(self, config: POMDPConfig):
+    def __init__(self, config: Union[WeakFeatureConfig, StrongFeatureConfig]):
         self.config = config
+        self.name = config.name
+        self.dependencies = config.dependencies
+        self.feature_type = FeatureType.WEAK if isinstance(config, WeakFeatureConfig) else FeatureType.STRONG
         
-    def compute_barriers(
-        self,
-        prices: pd.Series,
-        t: int,
-        horizon: int,
-        action: str
-    ) -> Tuple[float, float]:
-        """Compute TP and SL barriers in return space."""
-
-        # --- FORCE prices to be Series ---
-        if isinstance(prices, pd.DataFrame):
-            prices = prices.iloc[:, 0]
-
-        returns = prices.pct_change()
-
-        vol_slice = returns.iloc[max(0, t - self.config.VOL_WINDOW):t]
-
-        # --- FORCE scalar volatility ---
-        vol = float(vol_slice.std()) if len(vol_slice) > 0 else np.nan
-
-        if not np.isfinite(vol) or vol < 1e-6:
-            vol = 0.02  # conservative fallback
-
-        tp_threshold = self.config.TP_MULTIPLIER * vol
-        sl_threshold = -self.config.SL_MULTIPLIER * vol
-
-        if action == "SELL":
-            tp_threshold = -tp_threshold
-            sl_threshold = -sl_threshold
-
-        return tp_threshold, sl_threshold
-
-    def label_single_trade(
-    self,
-    prices: pd.Series | pd.DataFrame,
-    t: int,
-    action: str,
-    horizon: int
-) -> BarrierLabel:
-        """Label a single trade with triple barrier."""
-
-        # --- FORCE prices to Series ---
-        if isinstance(prices, pd.DataFrame):
-            prices = prices.iloc[:, 0]
-            
-        if action not in ["BUY", "SELL"]:
-            return BarrierLabel(BarrierOutcome.TIMEOUT, horizon, 0.0, horizon)
-        
-        tp_threshold, sl_threshold = self.compute_barriers(prices, t, horizon, action)
-        entry_price = prices.iloc[t]
-        
-        # Scan forward to find first barrier hit
-        for i in range(1, horizon + 1):
-            if t + i >= len(prices):
-                final_return = (prices.iloc[-1] / entry_price - 1)
-                if action == "SELL":
-                    final_return = -final_return
-                return BarrierLabel(BarrierOutcome.TIMEOUT, i, final_return, horizon)
-            
-            current_price = prices.iloc[t + i]
-            ret = (current_price / entry_price - 1)
-            
-            if action == "SELL":
-                ret = -ret
-
-            ret = float(ret)
-            
-            if ret >= tp_threshold:
-                return BarrierLabel(BarrierOutcome.TAKE_PROFIT, i, ret, horizon)
-            elif ret <= sl_threshold:
-                return BarrierLabel(BarrierOutcome.STOP_LOSS, i, ret, horizon)
-        
-        # Timeout
-        final_return = (prices.iloc[t + horizon] / entry_price - 1)
-        if action == "SELL":
-            final_return = -final_return
-        return BarrierLabel(BarrierOutcome.TIMEOUT, horizon, final_return, horizon)
+    @abstractmethod
+    def compute(self, inputs: Dict[str, pd.DataFrame], 
+                current_time: datetime) -> FeatureOutput:
+        """Compute feature values. Must be causal."""
+        pass
     
-    def label_dataset(self, prices: pd.Series, features_df: pd.DataFrame, 
-                      symbol: str, action: str, min_t: int = 0) -> pd.DataFrame:
-        """Create labeled dataset for training."""
-        labels_list = []
-        max_horizon = max(self.config.HORIZONS)
-        
-        for t in range(min_t, len(prices) - max_horizon):
-            row = {'t': t}
-            
-            # Add features
-            state_cols = [c for c in features_df.columns if c.startswith(f"{symbol}_")]
-            for col in state_cols:
-                row[col] = features_df[col].iloc[t]
-            
-            # Label for each horizon
-            for h in self.config.HORIZONS:
-                label = self.label_single_trade(prices, t, action, h)
-                row[f'outcome_h{h}'] = label.outcome.value
-                row[f'return_h{h}'] = label.return_at_hit
-                row[f'bars_to_hit_h{h}'] = label.bars_to_hit
-            
-            labels_list.append(row)
-        
-        return pd.DataFrame(labels_list)
-
-
-# ============================================================================
-# BARRIER PROBABILITY MODELS
-# ============================================================================
-
-class BarrierProbabilityModels:
-    """Train calibrated probability models for barrier outcomes."""
+    @abstractmethod
+    def get_schema(self) -> Dict[str, str]:
+        """Return output schema: {feature_name: dtype}."""
+        pass
     
-    def __init__(self, config: POMDPConfig):
-        self.config = config
-        self.models: Dict[Tuple[str, int, str], lgb.Booster] = {}
-        self.feature_cols: List[str] = []
+    def validate_inputs(self, inputs: Dict[str, pd.DataFrame]) -> bool:
+        """Ensure all dependencies are present."""
+        return all(dep in inputs for dep in self.dependencies)
+
+
+class WeakFeature(Feature):
+    """Stateless feature transformation."""
     
-    def train_horizon_model(self, labeled_data: pd.DataFrame, horizon: int, action: str):
-        """Train models for a specific (action, horizon) pair."""
-        outcome_col = f'outcome_h{horizon}'
-        
-        feature_cols = [c for c in labeled_data.columns 
-                        if not c.startswith('outcome_') 
-                        and not c.startswith('return_')
-                        and not c.startswith('bars_to_hit_')
-                        and c != 't']
-        
-        X = labeled_data[feature_cols].fillna(0)
-        y = labeled_data[outcome_col]
-        
-        if len(X) < self.config.MIN_SAMPLES_PER_MODEL:
-            print(f"Insufficient data for {action} h={horizon}: {len(X)} samples")
-            return
-        
-        if not self.feature_cols:
-            self.feature_cols = feature_cols
-        
-        # Train TP classifier
-        y_tp = (y == BarrierOutcome.TAKE_PROFIT.value).astype(int)
-        
-        params = {
-            'objective': 'binary',
-            'metric': 'binary_logloss',
-            'max_depth': self.config.MAX_DEPTH,
-            'learning_rate': 0.03,
-            'feature_fraction': 0.7,
-            'bagging_fraction': 0.8,
-            'bagging_freq': 5,
-            'verbosity': -1,
-            'seed': 42
-        }
-        
-        ds_tp = lgb.Dataset(X, label=y_tp)
-        model_tp = lgb.train(params, ds_tp, num_boost_round=self.config.N_ESTIMATORS)
-        
-        # Train SL classifier
-        y_sl = (y == BarrierOutcome.STOP_LOSS.value).astype(int)
-        ds_sl = lgb.Dataset(X, label=y_sl)
-        model_sl = lgb.train(params, ds_sl, num_boost_round=self.config.N_ESTIMATORS)
-        
-        self.models[(action, horizon, 'TP')] = model_tp
-        self.models[(action, horizon, 'SL')] = model_sl
-        
-        pred_tp = model_tp.predict(X) > 0.5
-        pred_sl = model_sl.predict(X) > 0.5
-        acc_tp = (pred_tp == y_tp).mean()
-        acc_sl = (pred_sl == y_sl).mean()
+    def __init__(self, config: WeakFeatureConfig):
+        super().__init__(config)
+        self.params = config.params
+        self.window_size = config.window_size
     
-    def predict_probabilities(self, state: pd.DataFrame, action: str, horizon: int) -> Tuple[float, float]:
-        """Predict P(TP) and P(SL) for given state, action, horizon."""
-        key_tp = (action, horizon, 'TP')
-        key_sl = (action, horizon, 'SL')
-        
-        if key_tp not in self.models or key_sl not in self.models:
-            return 0.33, 0.33
-        
-        X = state[self.feature_cols].fillna(0)
-        
-        p_tp = self.models[key_tp].predict(X)[0]
-        p_sl = self.models[key_sl].predict(X)[0]
-        
-        # Ensure probabilities sum <= 1
-        total = p_tp + p_sl
-        if total > 1.0:
-            p_tp /= total
-            p_sl /= total
-        
-        return p_tp, p_sl
-
-
-# ============================================================================
-# BELIEF STATE CONSTRUCTION
-# ============================================================================
-
-@dataclass
-class BeliefState:
-    """Complete belief state representation."""
-    features: np.ndarray
-    regime_probs: np.ndarray
-    position: float
-    volatility: float
-    regime_entropy: float
-    t: int
-
-
-class BeliefStateConstructor:
-    """Build belief states from observations."""
+    @abstractmethod
+    def transform(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Pure transformation function."""
+        pass
     
-    def __init__(self, regime_module: RegimeInferenceModule, config: POMDPConfig):
-        self.regime_module = regime_module
-        self.config = config
-    
-    def construct(self, features_df: pd.DataFrame, symbol: str, t: int, 
-                  position: float, prices: pd.Series) -> BeliefState:
-        """Construct belief state at time t (no forward-looking)."""
-        state_cols = [c for c in features_df.columns if c.startswith(f"{symbol}_")]
-        feature_vec = features_df[state_cols].iloc[t].fillna(0).values
+    def compute(self, inputs: Dict[str, pd.DataFrame], 
+                current_time: datetime) -> FeatureOutput:
+        """Compute with guaranteed causality."""
+        assert self.validate_inputs(inputs)
         
-        regime_probs = self.regime_module.predict_regime_probabilities(features_df, symbol, t)
-        entropy = -np.sum(regime_probs * np.log(regime_probs + 1e-9))
+        # Combine inputs
+        combined = pd.concat([inputs[dep] for dep in self.dependencies], axis=1)
         
-        # --- FIX: Ensure prices is a simple Series, not a DataFrame ---
-        if isinstance(prices, pd.DataFrame):
-            prices = prices.squeeze()  # Converts single-column DF to Series
-
-        returns = prices.pct_change()
-        vol_calc = returns.iloc[max(0, t - self.config.VOL_WINDOW):t].std()
+        # Filter to current_time (no lookahead)
+        causal_data = combined[combined.index <= current_time]
         
-        # --- FIX: Handle if vol_calc is still a generic Series/Object ---
-        if isinstance(vol_calc, (pd.Series, np.ndarray)):
-            # If it's a series, extract the single value
-            vol_calc = vol_calc.item() if not vol_calc.empty else np.nan
-            
-        # Safe float conversion
-        try:
-            vol = float(vol_calc)
-        except (ValueError, TypeError):
-            vol = np.nan
-            
-        if np.isnan(vol) or vol < 1e-9:
-            vol = 0.02
+        # Transform
+        result = self.transform(causal_data)
         
-        return BeliefState(
-            features=feature_vec,
-            regime_probs=regime_probs,
-            position=position,
-            volatility=vol,
-            regime_entropy=entropy,
-            t=t
+        return FeatureOutput(
+            data=result,
+            dependencies_used=self.dependencies,
+            computation_time=0.0,  # Would track actual time
+            metadata={'window_size': self.window_size}
         )
 
 
-# ============================================================================
-# EXPECTED VALUE POLICY
-# ============================================================================
+class StrongFeature(Feature):
+    """Stateful/model-driven feature."""
+    
+    def __init__(self, config: StrongFeatureConfig):
+        super().__init__(config)
+        self.model_type = config.model_type
+        self.training_schedule = config.training_schedule
+        self.params = config.params
+        self.model: Optional[Any] = None
+        self.last_trained: Optional[datetime] = None
+        
+    @abstractmethod
+    def fit(self, training_data: pd.DataFrame, labels: Optional[pd.Series] = None):
+        """Train the internal model."""
+        pass
+    
+    @abstractmethod
+    def predict(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Generate feature values from model."""
+        pass
+    
+    def compute(self, inputs: Dict[str, pd.DataFrame], 
+                current_time: datetime) -> FeatureOutput:
+        """Compute using internal model."""
+        assert self.validate_inputs(inputs)
+        
+        combined = pd.concat([inputs[dep] for dep in self.dependencies], axis=1)
+        causal_data = combined[combined.index <= current_time]
+        
+        if self.model is None:
+            # Return default/null feature
+            return FeatureOutput(
+                data=pd.DataFrame(index=causal_data.index),
+                dependencies_used=self.dependencies,
+                computation_time=0.0,
+                metadata={'trained': False}
+            )
+        
+        result = self.predict(causal_data)
+        
+        return FeatureOutput(
+            data=result,
+            dependencies_used=self.dependencies,
+            computation_time=0.0,
+            metadata={'trained': True, 'last_trained': self.last_trained}
+        )
 
-class ExpectedValuePolicy:
-    """Select actions via expected payoff with uncertainty bonuses."""
+
+class FeatureDAG:
+    """Directed Acyclic Graph of features."""
     
-    def __init__(self, prob_models: BarrierProbabilityModels, config: POMDPConfig):
-        self.prob_models = prob_models
-        self.config = config
+    def __init__(self, weak_configs: List[WeakFeatureConfig],
+                 strong_configs: List[StrongFeatureConfig]):
+        self.features: Dict[str, Feature] = {}
+        self.dependency_graph: Dict[str, List[str]] = {}
+        self.execution_order: List[str] = []
+        
+        self._build_features(weak_configs, strong_configs)
+        self._validate_dag()
+        self._compute_execution_order()
     
-    def compute_expected_value(self, belief: BeliefState, action: str, 
-                                features_df: pd.DataFrame, symbol: str) -> Tuple[float, float]:
-        """Compute expected value and confidence for an action."""
-        if action not in ["BUY", "SELL"]:
-            return 0.0, 1.0
+    def _build_features(self, weak_configs, strong_configs):
+        """Instantiate all features."""
+        for config in weak_configs:
+            feature_class = self._get_weak_feature_class(config.feature_type)
+            self.features[config.name] = feature_class(config)
+            self.dependency_graph[config.name] = config.dependencies
         
-        state_cols = [c for c in features_df.columns if c.startswith(f"{symbol}_")]
-        state_df = features_df[state_cols].iloc[[belief.t]]
+        for config in strong_configs:
+            feature_class = self._get_strong_feature_class(config.feature_type)
+            self.features[config.name] = feature_class(config)
+            self.dependency_graph[config.name] = config.dependencies
+    
+    def _get_weak_feature_class(self, feature_type: str) -> type:
+        """Factory for weak features."""
+        # Would map to concrete implementations
+        raise NotImplementedError
+    
+    def _get_strong_feature_class(self, feature_type: str) -> type:
+        """Factory for strong features."""
+        raise NotImplementedError
+    
+    def _validate_dag(self):
+        """Ensure no cycles exist."""
+        visited = set()
+        rec_stack = set()
         
-        ev_total = 0.0
-        
-        for horizon in self.config.HORIZONS:
-            p_tp, p_sl = self.prob_models.predict_probabilities(state_df, action, horizon)
+        def has_cycle(node):
+            visited.add(node)
+            rec_stack.add(node)
             
-            reward_tp = belief.volatility * self.config.TP_MULTIPLIER
-            reward_sl = belief.volatility * self.config.SL_MULTIPLIER
+            for neighbor in self.dependency_graph.get(node, []):
+                if neighbor not in visited:
+                    if has_cycle(neighbor):
+                        return True
+                elif neighbor in rec_stack:
+                    return True
             
-            ev_horizon = p_tp * reward_tp - p_sl * reward_sl
-            weight = self.config.HORIZON_WEIGHTS.get(horizon, 0.0)
-            ev_total += weight * ev_horizon
+            rec_stack.remove(node)
+            return False
         
-        ev_total -= self.config.COST_PER_TRADE
-        entropy_penalty = self.config.REGIME_WEIGHT_DECAY * belief.regime_entropy
-        ev_total -= entropy_penalty
-        
-        confidence = 1.0 / (1.0 + belief.regime_entropy)
-        
-        return ev_total, confidence
+        for node in self.dependency_graph:
+            if node not in visited:
+                if has_cycle(node):
+                    raise ValueError(f"Cycle detected in feature DAG at {node}")
     
-    def select_action(self, belief: BeliefState, features_df: pd.DataFrame, 
-                      symbol: str, exploration: float = 0.0) -> Tuple[str, float]:
-        """Select action using UCB."""
-        actions = ["BUY", "SELL", "HOLD", "FLATTEN"]
+    def _compute_execution_order(self):
+        """Topological sort for execution order."""
+        in_degree = {node: 0 for node in self.dependency_graph}
         
-        ev_scores = {}
-        confidence_scores = {}
+        for deps in self.dependency_graph.values():
+            for dep in deps:
+                if dep in in_degree:
+                    in_degree[dep] += 1
         
-        for action in actions:
-            ev, conf = self.compute_expected_value(belief, action, features_df, symbol)
-            ucb_bonus = exploration * (1.0 - conf)
-            ev_scores[action] = ev + ucb_bonus
-            confidence_scores[action] = conf
+        queue = [node for node, degree in in_degree.items() if degree == 0]
         
-        best_action = max(ev_scores, key=ev_scores.get)
-        return best_action, confidence_scores[best_action]
+        while queue:
+            node = queue.pop(0)
+            self.execution_order.append(node)
+            
+            for neighbor in self.dependency_graph.get(node, []):
+                if neighbor in in_degree:
+                    in_degree[neighbor] -= 1
+                    if in_degree[neighbor] == 0:
+                        queue.append(neighbor)
+    
+    def compute_all(self, data_sources: Dict[str, pd.DataFrame],
+                    current_time: datetime) -> Dict[str, FeatureOutput]:
+        """Compute all features in dependency order."""
+        results = {}
+        available = {**data_sources}  # Start with raw data
+        
+        for feature_name in self.execution_order:
+            feature = self.features[feature_name]
+            output = feature.compute(available, current_time)
+            results[feature_name] = output
+            available[feature_name] = output.data
+        
+        return results
+    
+    def get_strong_features(self) -> List[StrongFeature]:
+        """Get all strong features for training."""
+        return [f for f in self.features.values() 
+                if isinstance(f, StrongFeature)]
 
 
 # ============================================================================
-# POMDP EXPERIENCE BUFFER
+# TRAINING LAYER
 # ============================================================================
 
 @dataclass
-class POMDPExperience:
-    """Experience tuple for POMDP learning."""
-    features: np.ndarray
-    regime_probs: np.ndarray
-    action: str
-    position: float
-    volatility: float
-    barrier_outcomes: Dict[int, BarrierLabel]
-    costs: float
-    t: int
+class TrainingContext:
+    """Context for a training run."""
+    feature_data: pd.DataFrame
+    labels: Optional[pd.Series]
+    validation_data: Optional[pd.DataFrame]
+    metadata: Dict[str, Any]
+    current_time: datetime
 
 
-class POMDPExperienceBuffer:
-    """Store POMDP experiences for training."""
+class Trainer(ABC):
+    """Abstract trainer interface."""
     
-    def __init__(self, max_size: int = 10000):
-        self.buffer: List[POMDPExperience] = []
-        self.max_size = max_size
-    
-    def add(self, experience: POMDPExperience):
-        self.buffer.append(experience)
-        if len(self.buffer) > self.max_size:
-            self.buffer.pop(0)
-    
-    def get_all(self) -> List[POMDPExperience]:
-        return self.buffer
-    
-    def __len__(self) -> int:
-        return len(self.buffer)
-
-
-# ============================================================================
-# WALK-FORWARD BACKTEST
-# ============================================================================
-
-def pomdp_walk_forward_backtest(
-    features_df: pd.DataFrame,
-    prices_dict: Dict[str, pd.Series],
-    symbols: List[str],
-    config: POMDPConfig
-) -> Dict:
-    """Complete POMDP-based walk-forward backtest."""
-    
-    print("POMDP WALK-FORWARD BACKTEST")
-    
-    # Initialize
-    equity = 100000.0
-    positions = {s: 0.0 for s in symbols}
-    equity_history = [equity]
-    position_history = [{s: 0.0 for s in symbols}]
-    
-    # Initialize modules per symbol
-    regime_modules = {s: RegimeInferenceModule(config) for s in symbols}
-    barrier_labelers = {s: TripleBarrierLabeler(config) for s in symbols}
-    prob_models = {s: BarrierProbabilityModels(config) for s in symbols}
-    belief_constructors = {s: BeliefStateConstructor(regime_modules[s], config) for s in symbols}
-    policies = {s: ExpectedValuePolicy(prob_models[s], config) for s in symbols}
-    experience_buffers = {s: POMDPExperienceBuffer(config.MAX_BUFFER_SIZE) for s in symbols}
-    
-    max_horizon = max(config.HORIZONS)
-    min_t = config.MIN_TRAIN_BARS
-    max_t = len(features_df) - max_horizon - 1
-    
-    models_trained = False
-    
-    # Walk-forward loop
-    for t in range(min_t, max_t):
+    def __init__(self, config: TrainingScheduleConfig):
+        self.config = config
+        self.mode = config.mode
+        self.frequency = config.frequency
+        self.min_samples = config.min_samples
         
-        if equity <= 0:
-            print(f"\nBANKRUPT at t={t}")
-            break
+    @abstractmethod
+    def should_train(self, current_bar: int, context: TrainingContext) -> bool:
+        """Determine if training should occur."""
+        pass
+    
+    @abstractmethod
+    def prepare_data(self, raw_data: pd.DataFrame, 
+                     current_time: datetime) -> TrainingContext:
+        """Prepare training data maintaining causality."""
+        pass
+    
+    @abstractmethod
+    def train(self, model: Any, context: TrainingContext) -> Any:
+        """Execute training."""
+        pass
+    
+    @abstractmethod
+    def validate(self, model: Any, context: TrainingContext) -> Dict[str, float]:
+        """Validate model performance."""
+        pass
+
+
+class SupervisedTrainer(Trainer):
+    """Trainer for supervised learning tasks."""
+    
+    def should_train(self, current_bar: int, context: TrainingContext) -> bool:
+        if len(context.feature_data) < self.min_samples:
+            return False
         
-        # Retrain phase
-        if (t - min_t) % config.RETRAIN_FREQUENCY == 0:
+        if current_bar < self.config.warm_up_bars:
+            return False
+        
+        return current_bar % self.frequency == 0
+    
+    def prepare_data(self, raw_data: pd.DataFrame, 
+                     current_time: datetime) -> TrainingContext:
+        """Prepare supervised learning data."""
+        # Would implement windowing logic
+        raise NotImplementedError
+    
+    def train(self, model: Any, context: TrainingContext) -> Any:
+        """Train supervised model."""
+        raise NotImplementedError
+    
+    def validate(self, model: Any, context: TrainingContext) -> Dict[str, float]:
+        """Compute validation metrics."""
+        raise NotImplementedError
+
+
+class RLTrainer(Trainer):
+    """Trainer for reinforcement learning agents."""
+    
+    def __init__(self, config: TrainingScheduleConfig):
+        super().__init__(config)
+        self.experience_buffer = []
+        self.episode_count = 0
+    
+    def should_train(self, current_bar: int, context: TrainingContext) -> bool:
+        # RL trains more frequently, based on experience buffer
+        return len(self.experience_buffer) >= self.config.min_samples
+    
+    def prepare_data(self, raw_data: pd.DataFrame, 
+                     current_time: datetime) -> TrainingContext:
+        """Prepare RL training batch."""
+        raise NotImplementedError
+    
+    def train(self, model: Any, context: TrainingContext) -> Any:
+        """Train RL agent."""
+        raise NotImplementedError
+    
+    def validate(self, model: Any, context: TrainingContext) -> Dict[str, float]:
+        """Compute RL metrics (returns, etc)."""
+        raise NotImplementedError
+    
+    def add_experience(self, state, action, reward, next_state, done):
+        """Add experience tuple to buffer."""
+        self.experience_buffer.append((state, action, reward, next_state, done))
+        
+        if len(self.experience_buffer) > 10000:  # Max buffer size
+            self.experience_buffer.pop(0)
+
+
+class TrainingOrchestrator:
+    """Manages all training schedules."""
+    
+    def __init__(self, feature_dag: FeatureDAG, models: Dict[str, 'Model']):
+        self.feature_dag = feature_dag
+        self.models = models
+        self.trainers: Dict[str, Trainer] = {}
+        self.training_history: List[Dict[str, Any]] = []
+        
+        self._build_trainers()
+    
+    def _build_trainers(self):
+        """Instantiate trainers for all trainable components."""
+        # Build trainers for strong features
+        for feature in self.feature_dag.get_strong_features():
+            trainer_class = self._get_trainer_class(feature.training_schedule.mode)
+            self.trainers[f"feature_{feature.name}"] = trainer_class(feature.training_schedule)
+        
+        # Build trainers for models
+        for model_name, model in self.models.items():
+            trainer_class = self._get_trainer_class(model.config.training_config.mode)
+            self.trainers[f"model_{model_name}"] = trainer_class(model.config.training_config)
+    
+    def _get_trainer_class(self, mode: TrainingMode) -> type:
+        """Factory for trainers."""
+        mapping = {
+            TrainingMode.SUPERVISED: SupervisedTrainer,
+            TrainingMode.REINFORCEMENT: RLTrainer,
+            # ... other modes
+        }
+        return mapping.get(mode, SupervisedTrainer)
+    
+    def step(self, current_bar: int, feature_data: pd.DataFrame, 
+             current_time: datetime):
+        """Check and execute training for current timestep."""
+        for name, trainer in self.trainers.items():
+            context = trainer.prepare_data(feature_data, current_time)
             
-            for symbol in symbols:
-                # Train regime model
-                regime_modules[symbol].train(features_df.iloc[:t], symbol)
+            if trainer.should_train(current_bar, context):
+                component_type, component_name = name.split('_', 1)
                 
-                # Create labeled datasets and train probability models
-                for action in ["BUY", "SELL"]:
-                    labeled_data = barrier_labelers[symbol].label_dataset(
-                        prices_dict[symbol],
-                        features_df,
-                        symbol,
-                        action,
-                        min_t=max(0, t - 504)
-                    )
-                    
-                    if len(labeled_data) < config.MIN_SAMPLES_PER_MODEL:
-                        print(f" Only {len(labeled_data)} samples, skipping")
-                        continue
-                    
-                    for horizon in config.HORIZONS:
-                        prob_models[symbol].train_horizon_model(labeled_data, horizon, action)
-            
-            models_trained = True
-            
-            if not models_trained and t == min_t + config.RETRAIN_FREQUENCY:
-                print(f"\n Warm-up complete. Resetting equity to $100,000")
-                equity = 100000.0
-                positions = {s: 0.0 for s in symbols}
-                equity_history = [equity]
-                position_history = [{s: 0.0 for s in symbols}]
+                if component_type == 'feature':
+                    component = self.feature_dag.features[component_name]
+                elif component_type == 'model':
+                    component = self.models[component_name]
+                
+                # Train
+                updated_component = trainer.train(component, context)
+                
+                # Validate
+                metrics = trainer.validate(updated_component, context)
+                
+                # Log
+                self.training_history.append({
+                    'time': current_time,
+                    'bar': current_bar,
+                    'component': name,
+                    'metrics': metrics
+                })
+                
+                print(f"Trained {name} at bar {current_bar}")
+
+
+# ============================================================================
+# MODEL LAYER
+# ============================================================================
+
+@dataclass
+class ModelOutput:
+    """Output from model inference."""
+    predictions: pd.DataFrame  # Columns match output_schema
+    confidence: Optional[pd.Series]
+    metadata: Dict[str, Any]
+
+
+class Model(ABC):
+    """Abstract model interface."""
+    
+    def __init__(self, config: ModelConfig):
+        self.config = config
+        self.name = config.name
+        self.input_features = config.input_features
+        self.output_schema = config.output_schema
+        self.trained = False
         
-        # Prediction & action phase
-        actions_taken = {}
-        new_positions = {}
-        confidences = {}
-        beliefs = {}
+    @abstractmethod
+    def fit(self, X: pd.DataFrame, y: pd.DataFrame):
+        """Train the model."""
+        pass
+    
+    @abstractmethod
+    def predict(self, X: pd.DataFrame) -> ModelOutput:
+        """Generate predictions."""
+        pass
+    
+    @abstractmethod
+    def get_input_schema(self) -> List[str]:
+        """Required input features."""
+        return self.input_features
+    
+    def validate_inputs(self, X: pd.DataFrame) -> bool:
+        """Ensure inputs match schema."""
+        return all(feat in X.columns for feat in self.input_features)
+
+
+class ModelRegistry:
+    """Central registry for all models."""
+    
+    def __init__(self, configs: List[ModelConfig]):
+        self.models: Dict[str, Model] = {}
+        self._build_models(configs)
+    
+    def _build_models(self, configs: List[ModelConfig]):
+        """Instantiate models from configs."""
+        for config in configs:
+            model_class = self._get_model_class(config.model_type)
+            self.models[config.name] = model_class(config)
+    
+    def _get_model_class(self, model_type: str) -> type:
+        """Factory for models."""
+        # Would map to concrete implementations
+        raise NotImplementedError
+    
+    def get(self, name: str) -> Model:
+        return self.models[name]
+    
+    def predict_all(self, features: pd.DataFrame) -> Dict[str, ModelOutput]:
+        """Run inference on all models."""
+        return {name: model.predict(features[model.input_features])
+                for name, model in self.models.items()
+                if model.trained and model.validate_inputs(features)}
+
+
+# ============================================================================
+# POLICY LAYER
+# ============================================================================
+
+@dataclass
+class PolicyDecision:
+    """Output from policy."""
+    actions: Dict[str, float]  # {symbol: position_size}
+    confidence: float
+    reasoning: Dict[str, Any]
+
+
+class Policy(ABC):
+    """Abstract policy interface."""
+    
+    def __init__(self, config: PolicyConfig):
+        self.config = config
+        self.name = config.name
+        self.models = config.models
         
-        for symbol in symbols:
-            belief = belief_constructors[symbol].construct(
-                features_df, symbol, t, positions[symbol], prices_dict[symbol]
+    @abstractmethod
+    def decide(self, model_outputs: Dict[str, ModelOutput],
+               current_state: Dict[str, Any]) -> PolicyDecision:
+        """Make trading decision from model outputs."""
+        pass
+    
+    @abstractmethod
+    def scale_risk(self, raw_actions: Dict[str, float],
+                   volatility: Dict[str, float]) -> Dict[str, float]:
+        """Apply risk scaling."""
+        pass
+
+
+class PolicyRegistry:
+    """Central registry for policies."""
+    
+    def __init__(self, configs: List[PolicyConfig], model_registry: ModelRegistry):
+        self.policies: Dict[str, Policy] = {}
+        self.model_registry = model_registry
+        self._build_policies(configs)
+    
+    def _build_policies(self, configs: List[PolicyConfig]):
+        """Instantiate policies."""
+        for config in configs:
+            policy_class = self._get_policy_class(config.policy_type)
+            self.policies[config.name] = policy_class(config)
+    
+    def _get_policy_class(self, policy_type: str) -> type:
+        """Factory for policies."""
+        raise NotImplementedError
+    
+    def execute(self, policy_name: str, model_outputs: Dict[str, ModelOutput],
+                current_state: Dict[str, Any]) -> PolicyDecision:
+        """Execute a policy."""
+        return self.policies[policy_name].decide(model_outputs, current_state)
+
+
+# ============================================================================
+# PORTFOLIO LAYER
+# ============================================================================
+
+@dataclass
+class PortfolioState:
+    """Current portfolio state."""
+    cash: float
+    positions: Dict[str, float]  # {symbol: shares}
+    equity: float
+    leverage: float
+    margin_used: float
+
+
+class Portfolio:
+    """Portfolio manager."""
+    
+    def __init__(self, config: PortfolioConfig):
+        self.config = config
+        self.state = PortfolioState(
+            cash=config.initial_capital,
+            positions={},
+            equity=config.initial_capital,
+            leverage=0.0,
+            margin_used=0.0
+        )
+        self.history: List[PortfolioState] = []
+        
+    def validate_decision(self, decision: PolicyDecision,
+                          prices: Dict[str, float]) -> bool:
+        """Check if decision violates constraints."""
+        # Check leverage limits
+        # Check position limits
+        # Check risk limits
+        raise NotImplementedError
+    
+    def compute_costs(self, old_positions: Dict[str, float],
+                      new_positions: Dict[str, float],
+                      prices: Dict[str, float]) -> float:
+        """Calculate transaction costs."""
+        total_cost = 0.0
+        
+        for symbol in set(list(old_positions.keys()) + list(new_positions.keys())):
+            old_pos = old_positions.get(symbol, 0.0)
+            new_pos = new_positions.get(symbol, 0.0)
+            
+            if abs(new_pos - old_pos) > 1e-6:
+                notional = abs(new_pos - old_pos) * prices[symbol]
+                total_cost += notional * self.config.cost_model['transaction']
+        
+        return total_cost
+    
+    def update(self, decision: PolicyDecision, prices: Dict[str, float]):
+        """Update portfolio based on decision."""
+        if not self.validate_decision(decision, prices):
+            return False
+        
+        costs = self.compute_costs(self.state.positions, decision.actions, prices)
+        
+        # Update positions and cash
+        # Apply costs
+        # Recompute equity, leverage, etc
+        
+        self.history.append(self.state)
+        return True
+
+
+# ============================================================================
+# EXECUTION LAYER
+# ============================================================================
+
+class Executor(ABC):
+    """Abstract executor interface."""
+    
+    def __init__(self, config: ExecutorConfig):
+        self.config = config
+        
+    @abstractmethod
+    def execute(self, decision: PolicyDecision, 
+                current_prices: Dict[str, float]) -> Dict[str, Any]:
+        """Execute trading decision."""
+        pass
+
+
+class BacktestExecutor(Executor):
+    """Backtest execution (immediate fills)."""
+    
+    def execute(self, decision: PolicyDecision, 
+                current_prices: Dict[str, float]) -> Dict[str, Any]:
+        """Perfect execution for backtesting."""
+        fills = {}
+        
+        for symbol, size in decision.actions.items():
+            fills[symbol] = {
+                'size': size,
+                'price': current_prices[symbol],
+                'timestamp': datetime.now()
+            }
+        
+        return fills
+
+
+# ============================================================================
+# BACKTEST ENGINE
+# ============================================================================
+
+class BacktestEngine:
+    """
+    The orchestrator. Controls the time loop and all state transitions.
+    Enforces causality by construction.
+    """
+    
+    def __init__(self, config: SystemConfig):
+        self.config = config
+        
+        # Build all components from config
+        self.data_registry = DataRegistry(config.data_sources)
+        self.feature_dag = FeatureDAG(config.weak_features, config.strong_features)
+        self.model_registry = ModelRegistry(config.models)
+        self.policy_registry = PolicyRegistry(config.policies, self.model_registry)
+        self.portfolio = Portfolio(config.portfolio)
+        self.executor = self._build_executor(config.executor)
+        
+        # Training orchestration
+        self.training_orchestrator = TrainingOrchestrator(
+            self.feature_dag, 
+            self.model_registry.models
+        )
+        
+        # State tracking
+        self.current_bar = 0
+        self.current_time: Optional[datetime] = None
+        self.history: Dict[str, List] = {
+            'equity': [],
+            'positions': [],
+            'decisions': [],
+            'features': [],
+            'training_events': []
+        }
+        
+    def _build_executor(self, config: ExecutorConfig) -> Executor:
+        """Factory for executors."""
+        if config.executor_type == 'backtest':
+            return BacktestExecutor(config)
+        # Would handle 'paper', 'live', etc
+        raise NotImplementedError(f"Executor type {config.executor_type} not implemented")
+    
+    def run(self) -> Dict[str, Any]:
+        """Execute complete backtest."""
+        print(f"Starting backtest: {self.config.name}")
+        
+        # Load all data
+        start = pd.Timestamp(self.config.backtest.start_date) if self.config.backtest.start_date else None
+        end = pd.Timestamp(self.config.backtest.end_date) if self.config.backtest.end_date else None
+        
+        data = self.data_registry.load_all(start, end)
+        
+        # Get time index
+        time_index = next(iter(data.values())).data.index
+        
+        # Main time loop - THIS IS THE ONLY LOOP
+        for t in time_index:
+            self.current_time = t
+            
+            # Get data up to current time (causal)
+            current_data = {name: ts.data[ts.data.index <= t] 
+                           for name, ts in data.items()}
+            
+            # 1. FEATURE COMPUTATION
+            features = self.feature_dag.compute_all(current_data, t)
+            
+            # Store for training
+            feature_df = pd.concat([f.data for f in features.values()], axis=1)
+            
+            # 2. TRAINING CHECK & EXECUTION
+            self.training_orchestrator.step(self.current_bar, feature_df, t)
+            
+            # 3. MODEL INFERENCE
+            model_outputs = self.model_registry.predict_all(feature_df.loc[[t]])
+            
+            # 4. POLICY DECISION
+            policy_name = self.config.policies[0].name  # Primary policy
+            current_state = {
+                'portfolio': self.portfolio.state,
+                'time': t,
+                'bar': self.current_bar
+            }
+            decision = self.policy_registry.execute(policy_name, model_outputs, current_state)
+            
+            # 5. PORTFOLIO UPDATE & EXECUTION
+            current_prices = {symbol: current_data[self.config.data_sources[0].name].loc[t, f'{symbol}_Close']
+                            for symbol in self.config.data_sources[0].symbols}
+            
+            self.portfolio.update(decision, current_prices)
+            fills = self.executor.execute(decision, current_prices)
+            
+            # 6. RECORD HISTORY
+            self.history['equity'].append(self.portfolio.state.equity)
+            self.history['positions'].append(self.portfolio.state.positions.copy())
+            self.history['decisions'].append(decision)
+            
+            if self.config.backtest.save_states:
+                self.history['features'].append(feature_df.loc[[t]])
+            
+            self.current_bar += 1
+        
+        # Compute metrics
+        results = self._compute_metrics()
+        
+        print(f"Backtest complete: {len(time_index)} bars")
+        return results
+    
+    def _compute_metrics(self) -> Dict[str, Any]:
+        """Compute performance metrics."""
+        equity = pd.Series(self.history['equity'])
+        returns = equity.pct_change().dropna()
+        
+        metrics = {
+            'final_equity': equity.iloc[-1],
+            'total_return': (equity.iloc[-1] / equity.iloc[0]) - 1,
+            'sharpe': np.sqrt(252) * returns.mean() / (returns.std() + 1e-9),
+            'max_drawdown': (equity / equity.expanding().max() - 1).min(),
+            'win_rate': (returns > 0).mean(),
+            'history': self.history,
+            'training_history': self.training_orchestrator.training_history
+        }
+        
+        return metrics
+
+
+# ============================================================================
+# SYSTEM BUILDER
+# ============================================================================
+
+class SystemBuilder:
+    """
+    Build complete trading system from config.
+    This is the entry point for all systems.
+    """
+    
+    @staticmethod
+    def from_config(config: SystemConfig) -> BacktestEngine:
+        """Construct entire system from config."""
+        
+        # Validate config
+        errors = config.validate()
+        if errors:
+            raise ValueError(f"Config validation failed:\n" + "\n".join(errors))
+        
+        # Set random seed
+        np.random.seed(config.random_seed)
+        
+        # Build engine
+        engine = BacktestEngine(config)
+        
+        return engine
+    
+    @staticmethod
+    def from_yaml(path: str) -> BacktestEngine:
+        """Load config from YAML and build system."""
+        # Would parse YAML into SystemConfig
+        raise NotImplementedError
+    
+    @staticmethod
+    def from_dict(config_dict: Dict[str, Any]) -> BacktestEngine:
+        """Build from dictionary."""
+        # Would convert dict to SystemConfig
+        raise NotImplementedError
+
+
+# ============================================================================
+# INTROSPECTION & DEBUGGING
+# ============================================================================
+
+class SystemIntrospector:
+    """Introspection and debugging tools."""
+    
+    def __init__(self, engine: BacktestEngine):
+        self.engine = engine
+    
+    def visualize_dag(self) -> str:
+        """Generate DOT graph of feature DAG."""
+        lines = ["digraph FeatureDAG {"]
+        
+        for feature_name, deps in self.engine.feature_dag.dependency_graph.items():
+            feature = self.engine.feature_dag.features[feature_name]
+            color = "lightblue" if feature.feature_type == FeatureType.WEAK else "orange"
+            lines.append(f'  "{feature_name}" [fillcolor={color}, style=filled];')
+            
+            for dep in deps:
+                lines.append(f'  "{dep}" -> "{feature_name}";')
+        
+        lines.append("}")
+        return "\n".join(lines)
+    
+    def get_training_timeline(self) -> pd.DataFrame:
+        """Return timeline of all training events."""
+        return pd.DataFrame(self.engine.training_orchestrator.training_history)
+    
+    def get_feature_importance(self, model_name: str) -> Dict[str, float]:
+        """Get feature importance for a model."""
+        model = self.engine.model_registry.get(model_name)
+        # Would extract feature importance
+        raise NotImplementedError
+    
+    def explain_decision(self, bar: int) -> Dict[str, Any]:
+        """Explain decision at specific bar."""
+        decision = self.engine.history['decisions'][bar]
+        features = self.engine.history['features'][bar] if self.engine.history['features'] else None
+        
+        return {
+            'bar': bar,
+            'time': self.engine.current_time,
+            'decision': decision,
+            'features': features,
+            'reasoning': decision.reasoning
+        }
+    
+    def replay(self, start_bar: int, end_bar: int):
+        """Replay and debug specific section."""
+        # Would re-run specific bars with detailed logging
+        raise NotImplementedError
+
+
+# ============================================================================
+# EXAMPLE USAGE PATTERN
+# ============================================================================
+
+def main():
+    # Define complete system via config
+    config = SystemConfig(
+        name="POMDP_Strategy_v1",
+        version="1.0.0",
+        description="Regime-aware multi-horizon trading",
+        random_seed=42,
+        
+        data_sources=[
+            DataSourceConfig(
+                name="market_data",
+                source_type="market",
+                symbols=["SPY", "QQQ"],
+                fields=["Open", "High", "Low", "Close", "Volume"],
+                interval="1d",
+                lookback_days=730,
+                provider="yahoo"
             )
-            beliefs[symbol] = belief
-            
-            if not models_trained:
-                action = np.random.choice(["BUY", "SELL", "HOLD", "FLATTEN"])
-                confidence = 0.5
-            else:
-                exploration = max(0.1, 1.0 - (t - min_t) / (max_t - min_t))
-                action, confidence = policies[symbol].select_action(
-                    belief, features_df, symbol, exploration
+        ],
+        
+        weak_features=[
+            WeakFeatureConfig(
+                name="returns",
+                feature_type="returns",
+                dependencies=["market_data"],
+                params={"lags": [1, 5, 21]}
+            ),
+            WeakFeatureConfig(
+                name="volatility",
+                feature_type="volatility",
+                dependencies=["returns"],
+                params={"windows": [10, 21, 63]}
+            )
+        ],
+        
+        strong_features=[
+            StrongFeatureConfig(
+                name="regime",
+                feature_type="regime",
+                dependencies=["returns", "volatility"],
+                model_type="lgbm",
+                training_schedule=TrainingScheduleConfig(
+                    mode=TrainingMode.SUPERVISED,
+                    frequency=21,
+                    min_samples=150,
+                    window_type=WindowType.EXPANDING,
+                    validation_split=0.2
                 )
-            
-            actions_taken[symbol] = action
-            confidences[symbol] = confidence
-            
-            # Convert action to position
-            if action == "HOLD":
-                new_positions[symbol] = positions[symbol]
-            elif action == "FLATTEN":
-                new_positions[symbol] = 0.0
-            elif action == "BUY":
-                vol_scale = np.clip(0.02 / (belief.volatility + 1e-9), 0.1, 2.0)
-                new_positions[symbol] = confidence * vol_scale * 0.5
-                new_positions[symbol] = np.clip(new_positions[symbol], 0, 1)
-            elif action == "SELL":
-                vol_scale = np.clip(0.02 / (belief.volatility + 1e-9), 0.1, 2.0)
-                new_positions[symbol] = -confidence * vol_scale * 0.5
-                new_positions[symbol] = np.clip(new_positions[symbol], -1, 0)
+            )
+        ],
         
-        # Normalize positions
-        total_abs = sum(abs(p) for p in new_positions.values())
-        if total_abs > config.PORTFOLIO_LEVERAGE:
-            scale = config.PORTFOLIO_LEVERAGE / total_abs
-            new_positions = {s: p * scale for s, p in new_positions.items()}
-        
-        # Compute transaction costs
-        total_costs = 0.0
-        for symbol in symbols:
-            trade_size = abs(new_positions[symbol] - positions[symbol])
-            if trade_size > 0.001:
-                cost_pct = config.COST_PER_TRADE * trade_size
-                total_costs += cost_pct
-        
-        equity *= (1.0 - total_costs)
-        
-        # Compute realized PnL
-        total_pnl = 0.0
-        for symbol in symbols:
-            price_t = float(prices_dict[symbol].iloc[t])
-            price_t1 = float(prices_dict[symbol].iloc[t + 1])
-            
-            ret = (price_t1 / price_t - 1)
-            pnl = ret * positions[symbol]
-            total_pnl += pnl
-        
-        equity *= (1.0 + total_pnl)
-        positions = new_positions.copy()
-        
-        equity_history.append(equity)
-        position_history.append(positions.copy())
-        
-        # Store experiences
-        if models_trained:
-            for symbol in symbols:
-                barrier_outcomes = {}
-                for horizon in config.HORIZONS:
-                    label = barrier_labelers[symbol].label_single_trade(
-                        prices_dict[symbol], t, actions_taken[symbol], horizon
-                    )
-                    barrier_outcomes[horizon] = label
-                
-                exp = POMDPExperience(
-                    features=beliefs[symbol].features,
-                    regime_probs=beliefs[symbol].regime_probs,
-                    action=actions_taken[symbol],
-                    position=positions[symbol],
-                    volatility=beliefs[symbol].volatility,
-                    barrier_outcomes=barrier_outcomes,
-                    costs=total_costs / len(symbols),
-                    t=t
+        models=[
+            ModelConfig(
+                name="probability_model",
+                model_type="lgbm",
+                input_features=["returns", "volatility", "regime"],
+                output_schema={"prob_tp": "continuous", "prob_sl": "continuous"},
+                training_config=TrainingScheduleConfig(
+                    mode=TrainingMode.SUPERVISED,
+                    frequency=21,
+                    min_samples=200,
+                    window_type=WindowType.ROLLING,
+                    window_size=504
                 )
-                experience_buffers[symbol].add(exp)
+            )
+        ],
         
-        print(f"\r{round((t - min_t) / (max_t - min_t) * 100, 2)}%", end="\r", flush=True)
-    
-    # Final results
-    print("BACKTEST COMPLETE")
-    
-    final_equity = equity_history[-1]
-    total_return = (final_equity - 100000) / 100000
-    
-    equity_series = pd.Series(equity_history)
-    returns = equity_series.pct_change().dropna()
-    sharpe = np.sqrt(252) * returns.mean() / (returns.std() + 1e-9)
-    
-    running_max = equity_series.expanding().max()
-    drawdown = (equity_series / running_max - 1)
-    max_dd = drawdown.min()
-    
-    print(f"\nFinal Equity:    ${final_equity:>12,.2f}")
-    print(f"Total Return:    {total_return:>12.2%}")
-    print(f"Sharpe Ratio:    {sharpe:>12.2f}")
-    print(f"Max Drawdown:    {max_dd:>12.2%}")
-    print(f"\nExperience buffer sizes:")
-    for symbol in symbols:
-        print(f"  {symbol}: {len(experience_buffers[symbol])} experiences")
-    
-    return {
-        'equity': equity_history,
-        'positions': position_history,
-        'final_equity': final_equity,
-        'total_return': total_return,
-        'sharpe': sharpe,
-        'max_drawdown': max_dd,
-        'experiences': experience_buffers
-    }
-
-# ============================================================================
-# VISUALIZATION
-# ============================================================================
-
-def plot_pomdp_performance(results: Dict, feature_index: pd.DatetimeIndex, min_t: int, benchmark_symbol: str = "SPY"):
-    """
-    Plot equity curve vs Benchmark, drawdown, and position history.
-    Automatically fetches benchmark data if not present in prices_dict.
-    """
-    print("\nGenerating performance plots...")
-    
-    # 1. Align Data with Dates
-    # The simulation runs from min_t to the end.
-    sim_dates = feature_index[min_t : min_t + len(results['equity'])]
-    
-    # Handle length mismatch
-    min_len = min(len(sim_dates), len(results['equity']))
-    sim_dates = sim_dates[:min_len]
-    equity_curve = pd.Series(results['equity'][:min_len], index=sim_dates)
-    
-    # Positions alignment
-    pos_df = pd.DataFrame(results['positions'])
-    pos_df = pos_df.iloc[:min_len]
-    pos_df.index = sim_dates
-    
-    # 2. Get Benchmark Prices (Handle Missing Data)
-    bench_prices = None
-    
-    # Case A: Benchmark is already in our loaded data
-    
-    # Case B: Fetch Benchmark from Yahoo Finance if missing
-    try:
-        import yfinance as yf
+        policies=[
+            PolicyConfig(
+                name="expected_value",
+                policy_type="expected_value",
+                models=["probability_model"],
+                aggregation="weighted_avg",
+                risk_scaling={"method": "vol_targeting", "target": 0.02}
+            )
+        ],
         
-        # Get start/end from simulation
-        start_date = sim_dates[0].date()
-        # Add a few days buffer to end date
-        end_date = (sim_dates[-1] + timedelta(days=5)).date()
+        portfolio=PortfolioConfig(
+            initial_capital=100000,
+            max_leverage=1.0,
+            position_limits={"SPY": 0.5, "QQQ": 0.5},
+            diversification_constraints={},
+            cost_model={"transaction": 0.001, "slippage": 0.0005},
+            risk_limits={"max_drawdown": 0.2}
+        ),
         
-        # Download
-        df = yf.download(benchmark_symbol, start=start_date, end=end_date, progress=False, auto_adjust=True)
+        executor=ExecutorConfig(
+            executor_type="backtest"
+        ),
         
-        if not df.empty:
-            # Handle MultiIndex or single column issues
-            if 'Close' in df.columns:
-                p = df['Close']
-            else:
-                p = df.iloc[:, 0]
-            
-            if isinstance(p, pd.DataFrame):
-                p = p.squeeze()
-            
-            bench_prices = p
-        else:
-            print(f"Could not fetch {benchmark_symbol}.")
-            
-    except Exception as e:
-        print(f"Benchmark fetch failed: {e}")
-
-    # 3. Calculate Benchmark Equity (Buy & Hold)
-    benchmark_equity = None
-    if bench_prices is not None:
-        try:
-            # Reindex to match simulation timestamps (Forward fill to fill gaps/weekends/hours)
-            # This aligns Daily SPY data to Hourly strategy data if necessary
-            bench_aligned = bench_prices.reindex(sim_dates, method='ffill')
-            
-            # Handle potential NaNs at the start (if SPY data starts later)
-            bench_aligned = bench_aligned.fillna(method='bfill')
-            
-            start_price = float(bench_aligned.iloc[0])
-            start_cap = float(equity_curve.iloc[0])
-            
-            if start_price > 0:
-                benchmark_equity = (bench_aligned / start_price) * start_cap
-        except Exception as e:
-            print(f"  ⚠️  Could not align benchmark data: {e}")
-
-    # 4. Calculate Drawdown
-    running_max = equity_curve.expanding().max()
-    drawdown = (equity_curve / running_max - 1)
-    
-    # 5. Create Plots
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14), sharex=True, gridspec_kw={'height_ratios': [2, 1, 2]})
-    
-    # -- Panel 1: Equity vs Benchmark --
-    ax1.plot(equity_curve, color='green', linewidth=2, label='POMDP Strategy')
-    
-    title_str = "Strategy Performance"
-    if benchmark_equity is not None:
-        ax1.plot(benchmark_equity, color='gray', linestyle='--', linewidth=1.5, alpha=0.7, label=f'{benchmark_symbol} Buy & Hold')
-        
-        # Calculate Benchmark Return for Title
-        try:
-            bench_ret = (benchmark_equity.iloc[-1] - benchmark_equity.iloc[0]) / benchmark_equity.iloc[0]
-            strat_ret = (equity_curve.iloc[-1] - equity_curve.iloc[0]) / equity_curve.iloc[0]
-            title_str = f"Strategy: {strat_ret:.2%} vs {benchmark_symbol}: {bench_ret:.2%}"
-        except:
-            pass
-
-    ax1.set_title(title_str, fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Equity ($)')
-    ax1.legend(loc='upper left')
-    ax1.grid(True, alpha=0.3)
-    
-    # -- Panel 2: Drawdown --
-    ax2.fill_between(drawdown.index, drawdown, 0, color='red', alpha=0.3)
-    ax2.plot(drawdown, color='red', linewidth=1)
-    ax2.set_ylabel('Drawdown (%)')
-    ax2.set_title('Risk Profile', fontsize=10)
-    ax2.grid(True, alpha=0.3)
-    
-    # -- Panel 3: Positions --
-    for col in pos_df.columns:
-        ax3.plot(pos_df.index, pos_df[col], label=col, linewidth=1.5, alpha=0.8)
-    
-    ax3.set_ylabel('Position Size (Leverage)')
-    ax3.set_title('Asset Allocation', fontsize=10)
-    ax3.legend(loc='upper left', ncol=3)
-    ax3.grid(True, alpha=0.3)
-    ax3.axhline(0, color='black', linewidth=1, linestyle='--')
-    
-    # Formatting
-    plt.xlabel('Date')
-    if len(sim_dates) > 0:
-        fig.autofmt_xdate()
-        
-    plt.tight_layout()
-    plt.show()
-
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
-
-def main(config: POMDPConfig):
-    """Main execution function."""
-    
-    print("POMDP TRADING SYSTEM - PRODUCTION IMPLEMENTATION")
-    
-    # Load data
-    print("\n[1/4] Loading market data...")
-    data_dict = load_data(config.SYMBOLS, config.LOOKBACK_DAYS, config.INTERVAL)
-    
-    # Feature engineering
-    print("\n[2/4] Engineering features...")
-    features_df = build_feature_matrix(data_dict)
-    
-    # Extract prices
-    prices_dict = {}
-    for symbol in config.SYMBOLS:
-        p = data_dict[symbol]['Close']
-        if isinstance(p, pd.DataFrame):
-            p = p.squeeze()
-        prices_dict[symbol] = p
-    
-    # Align indices
-    common_index = features_df.index
-    prices_dict = {s: prices_dict[s].loc[common_index] for s in config.SYMBOLS}
-    
-    # Run backtest
-    print("\n[3/4] Running POMDP backtest...")
-    results = pomdp_walk_forward_backtest(features_df, prices_dict, config.SYMBOLS, config)
-    
-    print("\n[4/4] Analysis complete!")
-
-    plot_pomdp_performance(
-        results, 
-        features_df.index, 
-        min_t=config.MIN_TRAIN_BARS
+        backtest=BacktestConfig(
+            start_date="2022-01-01",
+            end_date="2024-12-31",
+            benchmark="SPY",
+            metrics=["sharpe", "max_dd", "total_return"],
+            save_states=True,
+            introspection_level="full"
+        )
     )
-    
-    return results
 
+    # Build and run system
+    engine = SystemBuilder.from_config(config)
+    results = engine.run()
+
+    # Introspect
+    inspector = SystemIntrospector(engine)
+    print(inspector.visualize_dag())
+    print(inspector.get_training_timeline())
 
 if __name__ == "__main__":
-    results = main(config=POMDPConfig(
-        SYMBOLS=["SPY"],
-
-        LOOKBACK_DAYS=365,
-        INTERVAL="1d",
-        HORIZONS=[3, 5, 25],
-
-        TP_MULTIPLIER=2.0,
-        SL_MULTIPLIER=1.5,
-        VOL_WINDOW=10,
-
-        N_ESTIMATORS=35,
-        MAX_DEPTH=2,
-        MIN_TRAIN_BARS=45,
-        RETRAIN_FREQUENCY=20,
-
-        COST_PER_TRADE=0.001,
-        PORTFOLIO_LEVERAGE=1.0
-    ))
+    main()
