@@ -3,7 +3,7 @@ from AlgorithmImports import *
 from config import SimulationConfig
 from agent.base import Agent
 
-class LeanNativeAlgorithm(QCAlgorithm):
+class TradingAlgorithm(QCAlgorithm):
 
     def Initialize(self):
         self.config: SimulationConfig = self._load_config()
@@ -39,4 +39,3 @@ class LeanNativeAlgorithm(QCAlgorithm):
         # Thin translation layer only
         if action.type == "order":
             self.MarketOrder(action.symbol, action.quantity)
-
