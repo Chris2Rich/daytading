@@ -216,7 +216,7 @@ class ResearchAlgorithm(QCAlgorithm):
         np.random.seed(self.config.backtest.seed)
 
         # Build components (user-provided implementations)
-        self.data_source = self._build_data_source()
+        self.data_sources: List[DataSource] = self._build_data_sources()
         self.features = self._build_features()
         self.regime = self._build_regime()
         self.belief = Factory.belief(self.config)
@@ -234,8 +234,12 @@ class ResearchAlgorithm(QCAlgorithm):
         if self.IsWarmingUp:
             return
 
-        observation = self.data_source.observe(slice)
-        features = self.features.update(observation)
+        combined_observation = {}
+        for ds in self.data_sources:
+            obs = ds.observe(slice)
+            combined_observation.update(obs)  # merge into one dict
+
+        features = self.features.update(combined_observation)
         regime = self.regime.infer(features) if self.regime else None
         belief = self.belief.update(features, regime)
 
@@ -257,7 +261,7 @@ class ResearchAlgorithm(QCAlgorithm):
     def _load_config(self) -> Config:
         raise NotImplementedError
 
-    def _build_data_source(self) -> DataSource:
+    def _build_data_sources(self) -> List[DataSource]:
         raise NotImplementedError
 
     def _build_features(self) -> FeaturePipeline:
