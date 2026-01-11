@@ -1,99 +1,54 @@
-from typing import Dict, Any
-import pandas as pd
-
-from abstract import DataSource
+from AlgorithmImports import QCAlgorithm, BaseData, SubscriptionDataSource, SubscriptionTransportMedium
 from lib.retrieval.yahoofinance import get_trading
 
+class YahooFinanceOHLCV(BaseData):
+    """LEAN BaseData for Yahoo OHLCV bars."""
 
-class YahooFinanceOHLCVDataSource(DataSource):
-    """
-    LEAN-compatible DataSource that replays Yahoo Finance OHLCV data
-    causally, one bar per OnData call.
+    def __init__(self):
+        super().__init__()
+        self.Open = 0.0
+        self.High = 0.0
+        self.Low = 0.0
+        self.Close = 0.0
+        self.Volume = 0.0
 
-    - Inherits from DataSource(ABC)
-    - Ignores LEAN Slice (LEAN is only the clock)
-    - Prevents lookahead via internal cursor
-    """
+    @staticmethod
+    def GetSource(config, date, isLiveMode):
+        ticker = config.Symbol.Value
+        resolution = str(config.Resolution)
 
-    def __init__(
-        self,
-        ticker: str,
-        days: int,
-        interval: str,
-        include_volume: bool = True,
-    ):
-        self.ticker = ticker
-        self.reference = self.ticker + "OHLCV"
-        self.days = days
-        self.interval = interval
-        self.include_volume = include_volume
+        # Map LEAN resolution to Yahoo interval
+        interval_map = {"Minute": "1m", "Hour": "60m", "Daily": "1d"}
+        interval = interval_map.get(resolution, "1d")
 
-        self._data = self._load_data()
-        if self._data.empty:
+        # Days to fetch from config
+        days = getattr(config, "ohlcv_days", 365)
+
+        df = get_trading(ticker, days=days, interval=interval)
+        if df.empty:
             raise ValueError(f"No Yahoo Finance data for {ticker}")
 
-        self._cursor = 0
-        self._timestamps = self._data.index.tolist()
-
-    # ------------------------------------------------------------
-    # DataSource interface
-    # ------------------------------------------------------------
-
-    def observe(self, slice) -> Dict[str, Any]:
-        """
-        Emit the next causal market observation.
-
-        LEAN Slice is ignored intentionally.
-        """
-        if self._cursor >= len(self._data):
-            raise StopIteration("YahooFinanceDataSource exhausted")
-
-        row = self._data.iloc[self._cursor]
-        ts = self._timestamps[self._cursor]
-
-        observation = {self.reference : {
-            "timestamp": ts,
-            "open": float(row["Open"]),
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "close": float(row["Close"]),
-        }}
-
-        if self.include_volume and "Volume" in row:
-            observation[self.reference]["volume"] = float(row["Volume"])
-
-        self._cursor += 1
-        return observation
-
-    # ------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------
-
-    def _load_data(self) -> pd.DataFrame:
-        """
-        Fetch and normalize Yahoo Finance trading data.
-        """
-        df = get_trading(
-            ticker=self.ticker,
-            days=self.days,
-            interval=self.interval,
-        )
-
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            return pd.DataFrame()
-
-        # Standardize column names
+        # Ensure columns: Open, High, Low, Close, Volume
         df = df.rename(columns={"Adj Close": "Close"})
-
-        required = {"Open", "High", "Low", "Close"}
+        required = {"Open", "High", "Low", "Close", "Volume"}
         missing = required - set(df.columns)
         if missing:
-            raise ValueError(f"Missing required OHLC columns: {missing}")
-
-        # Sort strictly by time to enforce causality
+            raise ValueError(f"Missing OHLCV columns for {ticker}: {missing}")
         df = df.sort_index()
+        df.to_csv(f"data/{ticker}_{interval}.csv")
 
-        # Defensive cleaning
-        df = df.dropna(subset=list(required))
+        return SubscriptionDataSource(f"data/{ticker}_{interval}.csv", SubscriptionTransportMedium.LocalFile)
 
-        return df
+    def Reader(self, config, line, date, isLiveMode):
+        if not line or line.startswith("Date"):
+            return None
+        parts = line.strip().split(",")
+        bar = YahooFinanceOHLCV()
+        bar.Symbol = config.Symbol
+        bar.Time = pd.to_datetime(parts[0]).to_pydatetime()
+        bar.Open = float(parts[1])
+        bar.High = float(parts[2])
+        bar.Low = float(parts[3])
+        bar.Close = float(parts[4])
+        bar.Volume = float(parts[5]) if len(parts) > 5 else 0.0
+        return bar

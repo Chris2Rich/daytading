@@ -1,6 +1,5 @@
 # ============================================================
-# Quant Research Backbone — Single File
-# LEAN-compatible, walk-forward safe, agent-based architecture
+# Quant Research Backbone — LEAN-Native, Configurable, Agent-Based
 # ============================================================
 
 from dataclasses import dataclass, field
@@ -8,20 +7,23 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import timedelta
 from abc import ABC, abstractmethod
 import numpy as np
+import pandas as pd
+from AlgorithmImports import QCAlgorithm, BaseData, SubscriptionDataSource, SubscriptionTransportMedium
 
-from AlgorithmImports import QCAlgorithm
+from datasources import YahooFinanceOHLCV
 
 # ============================================================
-# 1. CONFIGURATION (Single Immutable Contract)
+# 1. CONFIGURATION
 # ============================================================
 
 @dataclass(frozen=True)
 class DataConfig:
     symbols: List[str]
-    resolution: str = "Minute"
+    resolution: str = "Minute"  # LEAN Resolution: Minute, Hour, Daily
     start_date: Tuple[int, int, int] = (2018, 1, 1)
     end_date: Tuple[int, int, int] = (2024, 1, 1)
     warmup_bars: int = 500
+    ohlcv_days: int = 365  # number of historical days to fetch from Yahoo
 
 @dataclass(frozen=True)
 class FeatureConfig:
@@ -87,19 +89,16 @@ class Config:
     backtest: BacktestConfig
 
 # ============================================================
-# 2. CORE INTERFACES (STRICT CONTRACTS)
+# 2. LEAN CUSTOM DATA TYPE (Yahoo OHLCV)
 # ============================================================
 
-class DataSource(ABC):
-    @abstractmethod
-    def observe(self, slice) -> Dict[str, Any]:
-        """Extract causal observations from LEAN Slice"""
-        pass
+# ============================================================
+# 3. CORE INTERFACES
+# ============================================================
 
 class FeaturePipeline(ABC):
     @abstractmethod
     def update(self, observation: Dict[str, Any]) -> np.ndarray:
-        """Update internal buffers and emit features"""
         pass
 
 class RegimeModel(ABC):
@@ -116,36 +115,28 @@ class Policy(ABC):
     @abstractmethod
     def act(self, belief: Any) -> Any:
         pass
-
     @abstractmethod
     def clone(self) -> "Policy":
-        """Return frozen copy for training"""
         pass
 
 class OutcomeModel(ABC):
     @abstractmethod
     def compute(self, history: Any) -> Any:
-        """Compute reward or label causally"""
         pass
 
 class Agent(ABC):
     @abstractmethod
     def act(self, belief: Any) -> Any:
         pass
-
     @abstractmethod
     def observe_outcome(self, outcome: Any) -> None:
         pass
-
     @abstractmethod
     def freeze_memory(self) -> Any:
-        """Snapshot experience for training"""
         pass
-
     @abstractmethod
     def train_on(self, snapshot: Any) -> Policy:
         pass
-
     @abstractmethod
     def swap_policy(self, policy: Policy) -> None:
         pass
@@ -161,14 +152,13 @@ class ExecutionEngine(ABC):
         pass
 
 # ============================================================
-# 3. MINIMAL SAFE IMPLEMENTATIONS (NON-STRATEGIC)
+# 4. MINIMAL SAFE IMPLEMENTATIONS
 # ============================================================
 
 class PeriodicTrainingScheduler(TrainingScheduler):
     def __init__(self, frequency: timedelta):
         self.frequency = frequency
         self.last_train_time = None
-
     def should_train(self, time) -> bool:
         if self.last_train_time is None:
             self.last_train_time = time
@@ -183,95 +173,76 @@ class IdentityBeliefState(BeliefState):
         return features
 
 # ============================================================
-# 4. FACTORIES (CONFIG-DRIVEN SUBSTITUTION POINTS)
-# ============================================================
-
-class Factory:
-
-    @staticmethod
-    def belief(config: Config) -> BeliefState:
-        if config.belief.type == "identity":
-            return IdentityBeliefState()
-        raise NotImplementedError("Unknown belief type")
-
-    @staticmethod
-    def scheduler(config: Config) -> TrainingScheduler:
-        return PeriodicTrainingScheduler(config.training.retrain_frequency)
-
-# ============================================================
-# 5. LEAN ORCHESTRATION (NO STRATEGY LOGIC)
+# 5. LEAN ALGORITHM
 # ============================================================
 
 class ResearchAlgorithm(QCAlgorithm):
 
     def Initialize(self):
-
         self.config = self._load_config()
-
         self.SetStartDate(*self.config.data.start_date)
         self.SetEndDate(*self.config.data.end_date)
         self.SetCash(self.config.execution.initial_cash)
         self.SetWarmUp(self.config.data.warmup_bars)
-
         np.random.seed(self.config.backtest.seed)
 
-        # Build components (user-provided implementations)
-        self.data_sources: List[DataSource] = self._build_data_sources()
+        # Subscribe Yahoo OHLCV for each symbol
+        self.yahoo_bars = []
+        for sym in self.config.data.symbols:
+            bar = self.AddData(YahooFinanceOHLCV, sym, getattr(self.config.data, "resolution"))
+            self.yahoo_bars.append(bar)
+
+        # Build agent components (user-defined)
         self.features = self._build_features()
         self.regime = self._build_regime()
-        self.belief = Factory.belief(self.config)
+        self.belief = IdentityBeliefState()
         self.agent = self._build_agent()
-        self.scheduler = Factory.scheduler(self.config)
+        self.scheduler = PeriodicTrainingScheduler(self.config.training.retrain_frequency)
         self.execution = self._build_execution()
 
-        self.Schedule.On(
-            self.DateRules.EveryDay(),
-            self.TimeRules.Midnight,
-            self._scheduled_training
-        )
+        self.Schedule.On(self.DateRules.EveryDay(), self.TimeRules.Midnight, self._scheduled_training)
 
     def OnData(self, slice):
         if self.IsWarmingUp:
             return
 
-        combined_observation = {}
-        for ds in self.data_sources:
-            obs = ds.observe(slice)
-            combined_observation.update(obs)  # merge into one dict
+        # Extract observation per symbol from slice
+        observation = {}
+        for sym in self.config.data.symbols:
+            bar = slice.Bars.get(sym)
+            if bar:
+                observation[sym] = {
+                    "open": bar.Open,
+                    "high": bar.High,
+                    "low": bar.Low,
+                    "close": bar.Close,
+                    "volume": bar.Volume,
+                    "timestamp": bar.EndTime,
+                }
 
-        features = self.features.update(combined_observation)
+        features = self.features.update(observation)
         regime = self.regime.infer(features) if self.regime else None
         belief = self.belief.update(features, regime)
-
         action = self.agent.act(belief)
         self.execution.execute(action)
 
     def _scheduled_training(self):
         if not self.scheduler.should_train(self.Time):
             return
-
         snapshot = self.agent.freeze_memory()
         new_policy = self.agent.train_on(snapshot)
         self.agent.swap_policy(new_policy)
 
-    # ========================================================
-    # USER MUST IMPLEMENT THESE BUILD METHODS
-    # ========================================================
-
+    # --------------------------------------------------------
+    # User must implement these
+    # --------------------------------------------------------
     def _load_config(self) -> Config:
         raise NotImplementedError
-
-    def _build_data_sources(self) -> List[DataSource]:
-        raise NotImplementedError
-
     def _build_features(self) -> FeaturePipeline:
         raise NotImplementedError
-
     def _build_regime(self) -> Optional[RegimeModel]:
         return None
-
     def _build_agent(self) -> Agent:
         raise NotImplementedError
-
     def _build_execution(self) -> ExecutionEngine:
         raise NotImplementedError
