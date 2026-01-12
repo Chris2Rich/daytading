@@ -12,3 +12,4 @@ asyncpg
 pyjwt[crypto]
 snaptrade-python-sdk
 lightgbm
+nautilus_trader
