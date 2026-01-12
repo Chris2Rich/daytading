@@ -7,7 +7,6 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
-
 # ============================================================================
 # ENUMS AND TYPE DEFINITIONS
 # ============================================================================
@@ -18,14 +17,12 @@ class ModelOutputType(Enum):
     TARGET_PRICE = "target_price"
     THRESHOLD = "threshold"  # Entry/exit thresholds
 
-
 class TradeAction(Enum):
     """Trading actions"""
     BUY = "buy"
     SELL = "sell"
     HOLD = "hold"
     FLATTEN = "flatten"
-
 
 class SizingMethod(Enum):
     """Position sizing methods"""
@@ -34,12 +31,10 @@ class SizingMethod(Enum):
     FRACTIONAL_KELLY = "fractional_kelly"
     RISK_BASED = "risk_based"
 
-
 class WindowType(Enum):
     """Training window types"""
     EXPANDING = "expanding"
     ROLLING = "rolling"
-
 
 # ============================================================================
 # DATA STRUCTURES
@@ -55,7 +50,6 @@ class ModelPrediction:
     exit_threshold: Optional[float] = None
     risk_factor: float = 1.0  # Used for position sizing
     confidence: float = 1.0
-
 
 @dataclass
 class BacktestConfig:
@@ -106,7 +100,6 @@ class BacktestConfig:
     
     # Data adapter configuration
     data_adapters: Dict[str, Type['BaseLeanDataAdapter']] = None
-
 
 # ============================================================================
 # ABSTRACT BASE CLASSES
@@ -177,7 +170,6 @@ class BaseModel(ABC):
         """Set internal model state"""
         self._state = state
 
-
 class BaseLeanDataAdapter(PythonData):
     """
     Abstract base class for LEAN data adapters.
@@ -219,7 +211,6 @@ class BaseLeanDataAdapter(PythonData):
         """
         pass
 
-
 # ============================================================================
 # POSITION SIZING CLASSES
 # ============================================================================
@@ -249,7 +240,6 @@ class BasePositionSizer(ABC):
         """
         pass
 
-
 class FixedPositionSizer(BasePositionSizer):
     """Fixed fraction position sizing"""
     
@@ -259,7 +249,6 @@ class FixedPositionSizer(BasePositionSizer):
         fraction = self.parameters.get('fraction', 0.1)
         target_value = portfolio_value * fraction * risk_factor
         return int(target_value / current_price)
-
 
 class KellyPositionSizer(BasePositionSizer):
     """Kelly Criterion position sizing"""
@@ -275,7 +264,6 @@ class KellyPositionSizer(BasePositionSizer):
         target_value = portfolio_value * kelly_fraction
         return int(target_value / current_price)
 
-
 class RiskBasedPositionSizer(BasePositionSizer):
     """Risk-based position sizing (e.g., volatility-adjusted)"""
     
@@ -289,7 +277,6 @@ class RiskBasedPositionSizer(BasePositionSizer):
         stop_loss_pct = 0.02
         position_value = target_risk / stop_loss_pct
         return int(position_value / current_price)
-
 
 # ============================================================================
 # FEATURE COMPUTATION
@@ -339,7 +326,6 @@ class FeatureEngine:
                 raise RuntimeError(f"Error computing feature {feature_func.__name__}: {str(e)}")
         
         return pd.DataFrame(features)
-
 
 # ============================================================================
 # MAIN LEAN ALGORITHM
@@ -661,7 +647,6 @@ class ModularBacktestAlgorithm(QCAlgorithm):
                 self.model.save_state(f"model_state_{self.Time.strftime('%Y%m%d')}.pkl")
             except Exception as e:
                 self.Error(f"Error saving model state: {str(e)}")
-
 
 # ============================================================================
 # MAIN ENTRY POINT
