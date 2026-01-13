@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Import all necessary components
+from main import run_backtest
 from models import RandomForestModel, ModelOutputType
 from adapters import YFinanceAdapter
 from position_sizers import (
@@ -89,14 +90,14 @@ SIMPLE_RF_CONFIG = {
     'model_output_type': ModelOutputType.ACTION,
     'model_params': {
         'output_type': ModelOutputType.ACTION,
-        'n_estimators': 200,
-        'max_depth': 15,
+        'n_estimators': 25,
+        'max_depth': 5,
         'min_samples_split': 5,
     },
     
     # Backtest period
     'backtest_start': datetime(2020, 1, 1),
-    'backtest_end': datetime(2023, 12, 31),
+    'backtest_end': datetime(2025, 12, 31),
     
     # Portfolio parameters
     'starting_capital': 100000,
@@ -112,7 +113,7 @@ SIMPLE_RF_CONFIG = {
     
     # Retraining schedule
     'retrain_frequency': 252,  # Retrain yearly (252 trading days)
-    'training_window_type': 'expanding',
+    'training_window_type': 'rolling',
     
     # Regime detection
     'regime_detector': volatility_regime_detector,
@@ -135,9 +136,7 @@ SIMPLE_RF_CONFIG = {
 # Usage Example
 # ============================================================================
 
-if __name__ == "__main__":
-    from main import run_backtest
-    
+if __name__ == "__main__":    
     # Choose which configuration to run
     config = SIMPLE_RF_CONFIG
     
@@ -156,3 +155,61 @@ if __name__ == "__main__":
     
     # Results would be extracted from engine
     # engine.get_result() or similar depending on NautilusTrader API
+    # Get performance statistics
+
+    # Get the account and positions
+    account = engine.trader.generate_account_report(Venue("SIM"))
+    positions = engine.trader.generate_positions_report()
+    orders = engine.trader.generate_order_fills_report()
+
+    # Print summary statistics
+    print("=== STRATEGY PERFORMANCE ===")
+    print(f"Total Orders: {len(orders)}")
+    print(f"Total Positions: {len(positions)}")
+
+    if len(positions) > 0:
+        # Convert P&L strings to numeric values
+        positions["pnl_numeric"] = positions["realized_pnl"].apply(
+            lambda x: float(str(x).replace(" USD", "").replace(",", ""))
+            if isinstance(x, str)
+            else float(x)
+        )
+
+        # Calculate win rate
+        winning_trades = positions[positions["pnl_numeric"] > 0]
+        losing_trades = positions[positions["pnl_numeric"] < 0]
+
+        win_rate = len(winning_trades) / len(positions) * 100 if len(positions) > 0 else 0
+
+        print(f"\nWin Rate: {win_rate:.1f}%")
+        print(f"Winning Trades: {len(winning_trades)}")
+        print(f"Losing Trades: {len(losing_trades)}")
+
+        # Calculate returns
+        total_pnl = positions["pnl_numeric"].sum()
+        avg_pnl = positions["pnl_numeric"].mean()
+        max_win = positions["pnl_numeric"].max()
+        max_loss = positions["pnl_numeric"].min()
+
+        print(f"\nTotal P&L: {total_pnl:.2f} USD")
+        print(f"Average P&L: {avg_pnl:.2f} USD")
+        print(f"Best Trade: {max_win:.2f} USD")
+        print(f"Worst Trade: {max_loss:.2f} USD")
+
+        # Calculate risk metrics if we have both wins and losses
+        if len(winning_trades) > 0 and len(losing_trades) > 0:
+            avg_win = winning_trades["pnl_numeric"].mean()
+            avg_loss = abs(losing_trades["pnl_numeric"].mean())
+            profit_factor = winning_trades["pnl_numeric"].sum() / abs(
+                losing_trades["pnl_numeric"].sum()
+            )
+
+            print(f"\nAverage Win: {avg_win:.2f} USD")
+            print(f"Average Loss: {avg_loss:.2f} USD")
+            print(f"Profit Factor: {profit_factor:.2f}")
+            print(f"Risk/Reward Ratio: {avg_win / avg_loss:.2f}")
+        else:
+            print("\nNo positions generated. Check strategy parameters.")
+
+        print("\n=== FINAL ACCOUNT STATE ===")
+        print(account.tail(1).to_string())

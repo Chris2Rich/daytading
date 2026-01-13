@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional, Union
 import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+import pickle
 
 
 class ModelOutputType(Enum):
@@ -163,7 +165,6 @@ class RandomForestModel(BaseModel):
         self.min_samples_split = min_samples_split
         
         # Lazy import to avoid hard dependency
-        from sklearn.ensemble import RandomForestClassifier
         self.model = RandomForestClassifier(
             n_estimators=n_estimators,
             max_depth=max_depth,
@@ -212,13 +213,11 @@ class RandomForestModel(BaseModel):
     
     def save_state(self, path: str):
         """Save model using pickle."""
-        import pickle
         with open(path, 'wb') as f:
             pickle.dump(self.model, f)
     
     def load_state(self, path: str):
         """Load model from pickle."""
-        import pickle
         with open(path, 'rb') as f:
             self.model = pickle.load(f)
         self.is_trained = True

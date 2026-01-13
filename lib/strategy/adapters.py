@@ -7,6 +7,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Optional, List
 import pandas as pd
+import yfinance as yf
+from pathlib import Path
 
 
 class BaseAdapter(ABC):
@@ -109,7 +111,6 @@ class YFinanceAdapter(BaseAdapter):
     def load_historical(self, symbol: str, start: datetime, 
                        end: datetime) -> pd.DataFrame:
         """Load historical data from Yahoo Finance."""
-        import yfinance as yf
         
         ticker = yf.Ticker(symbol)
         df = ticker.history(start=start, end=end, interval=self.interval)
@@ -159,7 +160,6 @@ class CSVAdapter(BaseAdapter):
     def load_historical(self, symbol: str, start: datetime,
                        end: datetime) -> pd.DataFrame:
         """Load historical data from CSV file."""
-        from pathlib import Path
         
         # Construct file path (assumes files named like "AAPL.csv")
         file_path = Path(self.data_dir) / f"{symbol}.csv"
