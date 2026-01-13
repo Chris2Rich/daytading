@@ -126,10 +126,6 @@ class YFinanceAdapter(BaseAdapter):
         # Select only required columns
         df = df[required_cols]
         
-        # Ensure timezone-aware index
-        if df.index.tz is None:
-            df.index = df.index.tz_localize('UTC')
-        
         return df
     
     def supports_streaming(self) -> bool:
