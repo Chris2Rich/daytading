@@ -5,6 +5,7 @@ This demonstrates how to set up a full trading strategy with all components.
 
 from datetime import datetime
 from pathlib import Path
+from nautilus_trader.model.identifiers import Venue
 
 # Import all necessary components
 from main import run_backtest
@@ -158,7 +159,7 @@ if __name__ == "__main__":
     # Get performance statistics
 
     # Get the account and positions
-    account = engine.trader.generate_account_report(Venue("SIM"))
+    account = engine.trader.generate_account_report(Venue("BINANCE"))
     positions = engine.trader.generate_positions_report()
     orders = engine.trader.generate_order_fills_report()
 

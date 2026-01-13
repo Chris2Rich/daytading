@@ -140,21 +140,15 @@ class MLTradingStrategy(Strategy):
         self.log.info("Starting ML Trading Strategy")
         
         # Step 1: Load historical data from all adapters
+        # --- FIX STARTS HERE ---
+        self._load_historical_data()  # <--- THIS LINE WAS MISSING
+        # --- FIX ENDS HERE ---
         
         # Step 2: Compute all features in batch mode
         self._compute_features_batch()
         
         # Step 3: Train initial model
-        self._train_model(initial=True)
-        
-        # Step 4: Subscribe to data for all traded symbols
-        for symbol in self.sys_config.traded_symbols:
-            instrument = self.cache.instrument(InstrumentId(Symbol(symbol), Venue("BINANCE")))
-            self.instruments[symbol] = instrument.id
-            self.subscribe_bars(BarType.from_str(f"{symbol}.BINANCE-1-MINUTE-LAST-INTERNAL"))
-            
-        self.log.info("Strategy initialization complete")
-    
+        self._train_model(initial=True) 
     def on_bar(self, bar: Bar):
         self.bar_count += 1
 
@@ -350,18 +344,36 @@ class MLTradingStrategy(Strategy):
         # Determine training window
         if initial or self.sys_config.training_window_type == 'expanding':
             train_data = self.feature_df
-        else:  # rolling window
+        else:
             window_size = self.sys_config.training_window_size or len(self.feature_df)
             train_data = self.feature_df.iloc[-window_size:]
         
         self.log.info(f"Training model on {len(train_data)} samples")
         
-        # Prepare training data (features + targets)
-        X = train_data.values
-        # Target could be future returns, labels, etc. - model-specific
-        # For now, assume model handles target extraction internally
+        # --- IMPROVED TARGET GENERATION ---
+        # 1. Get Close prices for the assets (assuming AAPL for this example, 
+        #    ideally you loop through symbols or train one model per symbol)
+        #    For this specific config, let's grab the Returns of AAPL (period 1) 
+        #    which allows us to know if price went up/down.
         
-        self.model.train(X, metadata={'regime': self.current_regime})
+        target_col = 'returns_AAPL_1' # From your config
+        
+        if target_col not in train_data.columns:
+            self.log.error(f"Target column {target_col} not found for training.")
+            return
+
+        # Shift returns backwards by 1 to predict *Next* bar's return using *Current* bar's features
+        # y = 1 (Buy) if next return > 0, else 0 (Sell/Hold)
+        future_returns = train_data[target_col].shift(-1)
+        
+        # Drop the last row (NaN target) from both X and y
+        X = train_data.iloc[:-1].values
+        y_raw = future_returns.iloc[:-1].values
+        
+        # Simple binary classification: 1 if Up, 0 if Down
+        y = np.where(y_raw > 0, 2, 0) # 2=Buy, 0=Sell (matching your Random Forest logic)
+        
+        self.model.train(X, y=y, metadata={'regime': self.current_regime})
         
         self.log.info("Model training complete")
     

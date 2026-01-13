@@ -176,13 +176,19 @@ class RandomForestModel(BaseModel):
               metadata: Optional[Dict[str, Any]] = None):
         """Train Random Forest on features."""
         if y is None:
-            # Extract targets from features (e.g., future returns)
-            # Simplified: use next-period return as target
+            # Fallback (Legacy logic)
             y = self._extract_targets(X)
         
-        self.model.fit(X[:-1], y)  # Exclude last sample (no future target)
+        # Ensure X and y lengths match
+        if len(X) != len(y):
+            # Trim to the smaller length
+            min_len = min(len(X), len(y))
+            X = X[:min_len]
+            y = y[:min_len]
+
+        self.model.fit(X, y)
         self.is_trained = True
-    
+
     def predict(self, X: np.ndarray, symbol: Optional[str] = None) -> SignalOutput:
         """Predict trading action using Random Forest."""
         if not self.is_trained:
