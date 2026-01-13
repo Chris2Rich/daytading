@@ -13,4 +13,4 @@ pyjwt[crypto]
 snaptrade-python-sdk
 lightgbm
 nautilus_trader
-sklearn
+scikit-learn

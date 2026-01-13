@@ -11,7 +11,7 @@ from datetime import datetime
 
 import pandas as pd
 from nautilus_trader.trading.strategy import Strategy
-from nautilus_trader.model.data import Bar, BarType
+from nautilus_trader.model.data import Bar, BarType, BarSpecification, BarAggregation
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.orders import MarketOrder
@@ -19,6 +19,11 @@ from nautilus_trader.model.position import Position
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.config import BacktestEngineConfig
 from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.identifiers import Venue, Symbol
+from nautilus_trader.model.currencies import USD
+from nautilus_trader.model.enums import AccountType, OmsType
+from nautilus_trader.model.objects import Money, Price, Quantity
+from nautilus_trader.model.instruments import Equity
 
 from models import BaseModel, ModelOutputType, SignalOutput
 from adapters import BaseAdapter
@@ -114,6 +119,9 @@ class MLTradingStrategy(Strategy):
         
         # Instrument mapping
         self.instruments: Dict[str, InstrumentId] = {}
+
+        self.account = None
+        self.account_id = None
         
     def on_start(self):
         """
@@ -122,6 +130,15 @@ class MLTradingStrategy(Strategy):
         2. Compute features in batch mode
         3. Train initial model
         """
+
+        accounts = list(self.cache.accounts())
+        if not accounts:
+            raise RuntimeError("No accounts found in cache.")
+        
+        self.account = accounts[0]  # Store the account object
+        self.account_id = self.account.id
+        self.log.info(f"Using account: {self.account_id}")
+        
         self.log.info("Starting ML Trading Strategy")
         
         # Step 1: Load historical data from all adapters
@@ -272,26 +289,34 @@ class MLTradingStrategy(Strategy):
         
         portfolio_data = []
         for ts in timestamps:
-            # Get portfolio state at this timestamp
-            # In production, query actual portfolio state from NautilusTrader
-            row = {
-                'cash': float(self.portfolio.account(self.account_id).balance_total()),
-                'equity': float(self.portfolio.account(self.account_id).equity()),
-            }
+            if self.account is None:
+                # Before account is set, use starting capital
+                row = {
+                    'cash': float(self.sys_config.starting_capital),
+                    'equity': float(self.sys_config.starting_capital),
+                }
+            else:
+                # Access account directly (not through portfolio)
+                row = {
+                    'cash': float(self.account.balance_total().as_double()),
+                    'equity': float(self.account.balance_total().as_double()),
+                }
             
             # Add position exposure for each symbol
             for symbol in self.sys_config.traded_symbols:
-                instrument_id = self.instruments.get(symbol)
-                if instrument_id:
-                    position = self.cache.position_for_order(instrument_id)
+                instrument_id = InstrumentId(
+                    symbol=Symbol(symbol),
+                    venue=Venue("BINANCE")
+                )
+                if instrument_id and self.account:
+                    position = self.cache.position(instrument_id)
                     row[f'position_{symbol}'] = float(position.quantity) if position else 0.0
                 else:
                     row[f'position_{symbol}'] = 0.0
             
             portfolio_data.append(row)
         
-        df = pd.DataFrame(portfolio_data, index=timestamps)
-        return df
+        return pd.DataFrame(portfolio_data, index=timestamps)
     
     def _train_model(self, initial: bool = False):
         """Train or retrain the model on available data."""
@@ -421,15 +446,71 @@ def run_backtest(config_dict: Dict[str, Any]) -> BacktestEngine:
     config = TradingSystemConfig(config_dict)
     
     # Initialize backtest engine
-    engine_config = BacktestEngineConfig(
-        logging_level="INFO",
-        cache_database_flush=True,
+    engine = BacktestEngine(config=BacktestEngineConfig())
+
+    engine.add_venue(
+    venue=Venue("BINANCE"),
+    oms_type=OmsType.NETTING,
+    account_type=AccountType.CASH,
+    base_currency=USD,
+    starting_balances=[Money(config.starting_capital, USD)],
     )
-    engine = BacktestEngine(config=engine_config)
     
     # Add venues and instruments (simplified - extend as needed)
     # This would typically load from adapters
-    
+    for symbol in config.traded_symbols:
+        instrument = Equity(
+            instrument_id=InstrumentId(Symbol(symbol), Venue("BINANCE")),
+            raw_symbol=Symbol(symbol),
+            currency=USD,
+            price_precision=2,
+            price_increment=Price.from_str("0.01"),
+            lot_size=Quantity.from_int(1),
+            ts_event=0,
+            ts_init=0,
+        )
+        engine.add_instrument(instrument)
+
+    for symbol in config.traded_symbols:
+        if symbol in config.data_adapters:
+            adapter = config.data_adapters[symbol]
+            
+            # Load historical data from adapter
+            df = adapter.load_historical(
+                symbol=symbol,
+                start=config.backtest_start,
+                end=config.backtest_end
+            )
+            
+            # Convert DataFrame to NautilusTrader Bar objects
+            bars = []
+            instrument_id = InstrumentId(Symbol(symbol), Venue("BINANCE"))
+            bar_type = BarType(
+                instrument_id=instrument_id,
+                bar_spec=BarSpecification(
+                    step=1,
+                    aggregation=BarAggregation.MINUTE,
+                    price_type=PriceType.LAST
+                ),
+                aggregation_source=AggregationSource.EXTERNAL
+            )
+            
+            for ts, row in df.iterrows():
+                bar = Bar(
+                    bar_type=bar_type,
+                    open=Price.from_str(str(row['open'])),
+                    high=Price.from_str(str(row['high'])),
+                    low=Price.from_str(str(row['low'])),
+                    close=Price.from_str(str(row['close'])),
+                    volume=Quantity.from_str(str(row['volume'])),
+                    ts_event=int(ts.timestamp() * 1e9),  # Convert to nanoseconds
+                    ts_init=int(ts.timestamp() * 1e9),
+                )
+                bars.append(bar)
+            
+            # Add bars to engine
+            engine.add_data(bars)
+
     # Create and add strategy
     strategy = MLTradingStrategy(config)
     engine.add_strategy(strategy)
