@@ -140,7 +140,6 @@ class MLTradingStrategy(Strategy):
         self.log.info("Starting ML Trading Strategy")
         
         # Step 1: Load historical data from all adapters
-        self._load_historical_data()
         
         # Step 2: Compute all features in batch mode
         self._compute_features_batch()
@@ -150,65 +149,101 @@ class MLTradingStrategy(Strategy):
         
         # Step 4: Subscribe to data for all traded symbols
         for symbol in self.sys_config.traded_symbols:
-            instrument_id = InstrumentId.from_str(symbol)
-            self.instruments[symbol] = instrument_id
+            instrument = self.cache.instrument(InstrumentId(Symbol(symbol), Venue("BINANCE")))
+            self.instruments[symbol] = instrument.id
             self.subscribe_bars(BarType.from_str(f"{symbol}.BINANCE-1-MINUTE-LAST-INTERNAL"))
             
         self.log.info("Strategy initialization complete")
     
     def on_bar(self, bar: Bar):
-        """
-        Called on each new bar. Main execution loop:
-        1. Update features with new bar
-        2. Check regime (if applicable)
-        3. Get model predictions for all symbols
-        4. Size positions
-        5. Execute trades
-        6. Check if retraining needed
-        """
         self.bar_count += 1
-        
-        # Update raw data with new bar
-        symbol = str(bar.bar_type.instrument_id)
+
+        # ----------------------------------------------------
+        # 1. Update raw market data
+        # ----------------------------------------------------
+        symbol = bar.bar_type.instrument_id.symbol.value
         if symbol not in self.raw_data:
             self.raw_data[symbol] = pd.DataFrame()
-        
-        # Convert bar to dataframe row (simplified - extend as needed)
-        bar_data = pd.DataFrame([{
-            'timestamp': bar.ts_event,
-            'open': float(bar.open),
-            'high': float(bar.high),
-            'low': float(bar.low),
-            'close': float(bar.close),
-            'volume': float(bar.volume)
-        }])
-        bar_data.set_index('timestamp', inplace=True)
+
+        bar_data = pd.DataFrame(
+            [{
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "volume": float(bar.volume),
+            }],
+            index=[bar.ts_event],
+        )
+
         self.raw_data[symbol] = pd.concat([self.raw_data[symbol], bar_data])
-        
-        # Regime detection check
-        if (self.sys_config.regime_detector and 
-            self.bar_count % self.sys_config.regime_check_frequency == 0):
+        self.raw_data[symbol] = self.raw_data[symbol].iloc[-2000:]
+
+        # ----------------------------------------------------
+        # 2. Compute market features (LATEST ONLY)
+        # ----------------------------------------------------
+        market_features = {}
+
+        for feature_func, params in self.online_features:
+            feature_value = feature_func(self.raw_data, **params)
+
+            if isinstance(feature_value, pd.Series):
+                feature_value = feature_value.to_frame(name=feature_func.__name__)
+
+            market_features.update(feature_value.iloc[-1].to_dict())
+
+        # ----------------------------------------------------
+        # 3. Snapshot portfolio state (AFTER previous fills)
+        # ----------------------------------------------------
+        if not self.model.is_trained:
+            portfolio_features = {}
+        else:
+            portfolio_features = self._get_portfolio_snapshot()
+
+        # ----------------------------------------------------
+        # 4. Append ONE causal feature row
+        # ----------------------------------------------------
+        feature_row = {**market_features, **portfolio_features}
+
+        row_df = pd.DataFrame([feature_row], index=[bar.ts_event])
+        row_df = row_df.reindex(columns=self.feature_columns, fill_value=0.0)
+
+        self.feature_df = pd.concat([self.feature_df, row_df])
+
+        # ----------------------------------------------------
+        # 5. Regime detection (optional)
+        # ----------------------------------------------------
+        if (
+            self.sys_config.regime_detector
+            and self.bar_count % self.sys_config.regime_check_frequency == 0
+        ):
             new_regime = self._check_regime()
             if new_regime != self.current_regime:
-                self.log.info(f"Regime change detected: {self.current_regime} -> {new_regime}")
+                self.log.info(
+                    f"Regime change detected: {self.current_regime} -> {new_regime}"
+                )
                 self.current_regime = new_regime
                 self._handle_regime_change()
-        
-        # Update features incrementally (append new feature values)
-        self._update_features_incremental()
-        
-        # Generate signals for all traded symbols
+
+        # ----------------------------------------------------
+        # 6. Generate signals
+        # ----------------------------------------------------
         signals = self._generate_signals()
-        
-        # Execute trades based on signals
+
+        # ----------------------------------------------------
+        # 7. Execute trades
+        # ----------------------------------------------------
         self._execute_trades(signals)
-        
-        # Check if retraining is needed
+
+        # ----------------------------------------------------
+        # 8. Retraining check
+        # ----------------------------------------------------
         if self._should_retrain():
             self.log.info(f"Retraining model at bar {self.bar_count}")
             self._train_model(initial=False)
             self.last_retrain_bar = self.bar_count
-    
+
+
     def on_stop(self):
         """Called when strategy stops. Save model state."""
         self._save_model()
@@ -233,89 +268,79 @@ class MLTradingStrategy(Strategy):
             else:
                 self.log.warning(f"No adapter configured for {symbol}")
     
+    def _feature_required_symbols(self, params: dict) -> set[str]:
+        symbols = set()
+
+        if "symbol" in params:
+            symbols.add(params["symbol"])
+
+        if "symbols" in params:
+            symbols.update(params["symbols"])
+
+        return symbols
+
+
     def _compute_features_batch(self):
-        """Compute all features in batch mode from historical data."""
-        self.log.info("Computing features in batch mode...")
-        
+        self.log.info("Computing batch-safe features...")
+
         feature_dfs = []
-        
+        self.online_features = []
+
         for feature_func, params in self.sys_config.features:
-            self.log.info(f"Computing feature: {feature_func.__name__}")
-            
-            # Feature functions receive raw data and parameters
-            feature_values = feature_func(self.raw_data, **params)
-            
-            # Ensure feature_values is a DataFrame with timestamp index
-            if isinstance(feature_values, pd.Series):
-                feature_values = feature_values.to_frame(name=feature_func.__name__)
-            
-            feature_dfs.append(feature_values)
-        
-        # Add portfolio state features (positions, cash, etc.)
-        portfolio_features = self._compute_portfolio_features()
-        feature_dfs.append(portfolio_features)
-        
-        # Merge all features on timestamp
-        self.feature_df = pd.concat(feature_dfs, axis=1)
-        self.feature_df = self.feature_df.fillna(method='ffill').fillna(0)
-        
-        self.log.info(f"Feature matrix shape: {self.feature_df.shape}")
-    
-    def _update_features_incremental(self):
-        """Update features with latest bar data (incremental computation)."""
-        # For simplicity in initial implementation, recompute features
-        # In production, implement efficient rolling window updates
-        feature_updates = []
-        
-        for feature_func, params in self.sys_config.features:
-            # Compute only for recent data window
-            feature_value = feature_func(self.raw_data, **params)
-            if isinstance(feature_value, pd.Series):
-                feature_value = feature_value.to_frame(name=feature_func.__name__)
-            feature_updates.append(feature_value.iloc[[-1]])
-        
-        # Add current portfolio state
-        portfolio_features = self._compute_portfolio_features()
-        feature_updates.append(portfolio_features.iloc[[-1]])
-        
-        new_row = pd.concat(feature_updates, axis=1)
-        self.feature_df = pd.concat([self.feature_df, new_row])
-    
-    def _compute_portfolio_features(self) -> pd.DataFrame:
-        """Compute features representing current portfolio state."""
-        timestamps = list(self.raw_data.values())[0].index
-        
-        portfolio_data = []
-        for ts in timestamps:
-            if self.account is None:
-                # Before account is set, use starting capital
-                row = {
-                    'cash': float(self.sys_config.starting_capital),
-                    'equity': float(self.sys_config.starting_capital),
-                }
+            required_symbols = self._feature_required_symbols(params)
+
+            # Batch-safe only if ALL symbols already loaded
+            if required_symbols.issubset(self.raw_data.keys()):
+                self.log.info(f"Batch feature: {feature_func.__name__}")
+
+                feature_values = feature_func(self.raw_data, **params)
+
+                if isinstance(feature_values, pd.Series):
+                    feature_values = feature_values.to_frame()
+
+                feature_dfs.append(feature_values)
             else:
-                # Access account directly (not through portfolio)
-                row = {
-                    'cash': float(self.account.balance_total().as_double()),
-                    'equity': float(self.account.balance_total().as_double()),
-                }
-            
-            # Add position exposure for each symbol
-            for symbol in self.sys_config.traded_symbols:
-                instrument_id = InstrumentId(
-                    symbol=Symbol(symbol),
-                    venue=Venue("BINANCE")
-                )
-                if instrument_id and self.account:
-                    position = self.cache.position(instrument_id)
-                    row[f'position_{symbol}'] = float(position.quantity) if position else 0.0
-                else:
-                    row[f'position_{symbol}'] = 0.0
-            
-            portfolio_data.append(row)
-        
-        return pd.DataFrame(portfolio_data, index=timestamps)
-    
+                self.log.info(f"Online feature: {feature_func.__name__}")
+                self.online_features.append((feature_func, params))
+
+        if feature_dfs:
+            self.feature_df = pd.concat(feature_dfs, axis=1)
+            self.feature_df = self.feature_df.fillna(method="ffill").fillna(0)
+        else:
+            self.feature_df = pd.DataFrame()
+
+        self.feature_columns = list(self.feature_df.columns)
+
+        self.log.info(
+            f"Batch features: {len(feature_dfs)}, Online features: {len(self.online_features)}"
+        )
+
+
+    def _get_portfolio_snapshot(self) -> dict:
+        if not self.account:
+            equity = float(self.sys_config.starting_capital)
+            cash = equity
+            positions = {}
+        else:
+            equity = float(self.portfolio.account(self.account_id).equity())
+            cash = float(self.portfolio.account(self.account_id).cash())
+
+            positions = {
+                p.instrument_id.symbol.value: float(p.quantity)
+                for p in self.account.positions()
+            }
+
+        snapshot = {
+            "cash": cash,
+            "equity": equity,
+        }
+
+        for symbol in self.sys_config.traded_symbols:
+            snapshot[f"position_{symbol}"] = positions.get(symbol, 0.0)
+
+        return snapshot
+
+
     def _train_model(self, initial: bool = False):
         """Train or retrain the model on available data."""
         if self.feature_df is None or len(self.feature_df) < 100:
@@ -362,8 +387,12 @@ class MLTradingStrategy(Strategy):
                 continue
             
             # Calculate position size using position sizer
-            current_position = self.cache.position(instrument_id)
-            current_quantity = float(current_position.quantity) if current_position else 0.0
+            position = next(
+                (p for p in self.account.positions() if p.instrument_id == instrument_id),
+                None,
+            )
+            current_quantity = float(position.quantity) if position else 0.0
+
             
             target_quantity = self.position_sizer.calculate_size(
                 signal=signal,
@@ -493,14 +522,22 @@ def run_backtest(config_dict: Dict[str, Any]) -> BacktestEngine:
                 aggregation_source=AggregationSource.EXTERNAL
             )
             
+            def to_price(value: float, precision: int = 2) -> Price:
+                q = Decimal(str(value)).quantize(Decimal("1." + "0" * precision))
+                return Price.from_str(format(q, "f"))
+
+            def to_quantity(value: float, precision: int = 0) -> Price:
+                q = Decimal(str(value)).quantize(Decimal("1." + "0" * precision))
+                return Quantity.from_str(format(q, "f"))
+
             for ts, row in df.iterrows():
                 bar = Bar(
                     bar_type=bar_type,
-                    open=Price.from_str(str(row['open'])),
-                    high=Price.from_str(str(row['high'])),
-                    low=Price.from_str(str(row['low'])),
-                    close=Price.from_str(str(row['close'])),
-                    volume=Quantity.from_str(str(row['volume'])),
+                    open=to_price(row['open']),
+                    high=to_price(row['high']),
+                    low=to_price(row['low']),
+                    close=to_price(row['close']),
+                    volume=to_quantity(row['volume']),
                     ts_event=int(ts.timestamp() * 1e9),  # Convert to nanoseconds
                     ts_init=int(ts.timestamp() * 1e9),
                 )
