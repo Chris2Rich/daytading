@@ -9,15 +9,17 @@ from pathlib import Path
 import pickle
 from datetime import datetime
 import math
-
-import numpy as np
 import pandas as pd
+import numpy as np
+from uuid import uuid4 as py_uuid4
+
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.orders import MarketOrder
 from nautilus_trader.model.position import Position
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.config import BacktestEngineConfig
 from nautilus_trader.config import StrategyConfig
+from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.model.enums import *
 from nautilus_trader.model.data import *
 from nautilus_trader.model.identifiers import *
@@ -529,14 +531,15 @@ class MLTradingStrategy(Strategy):
             order_quantity = int(order_quantity)
             
             order = MarketOrder(
-                trader_id=self.trader_id,
-                strategy_id=self.id,
-                instrument_id=instrument_id,
-                order_side=order_side,
-                quantity=Decimal(str(order_quantity)),
-                time_in_force=TimeInForce.GTC,
-                venue=instrument_id.venue,
-                ts_event=int(pd.Timestamp.utcnow().timestamp() * 1e9),
+                self.trader_id,                         # TraderId
+                self.id,                                # StrategyId
+                instrument_id,                          # InstrumentId
+                ClientOrderId(str(py_uuid4())),             # client_order_id
+                order_side,                             # OrderSide.BUY / SELL
+                Quantity.from_int(order_quantity),       # Quantity
+                UUID4.from_str(str(py_uuid4())),                                # init_id
+                self.clock.timestamp_ns(),               # ts_init (ENGINE TIME)
+                TimeInForce.GTC,                        # optional
             )
             
             self.submit_order(order)
@@ -594,9 +597,9 @@ def run_backtest(config_dict: Dict[str, Any]) -> BacktestEngine:
     engine = BacktestEngine(config=BacktestEngineConfig())
 
     engine.add_venue(
-    venue=Venue("BINANCE"),
+    venue=Venue("BACKTESTING"),
     oms_type=OmsType.NETTING,
-    account_type=AccountType.CASH,
+    account_type=AccountType.MARGIN,
     base_currency=USD,
     starting_balances=[Money(config.starting_capital, USD)],
     )
@@ -605,7 +608,7 @@ def run_backtest(config_dict: Dict[str, Any]) -> BacktestEngine:
     # This would typically load from adapters
     for symbol in config.traded_symbols:
         instrument = Equity(
-            instrument_id=InstrumentId(Symbol(symbol), Venue("BINANCE")),
+            instrument_id=InstrumentId(Symbol(symbol), Venue("BACKTESTING")),
             raw_symbol=Symbol(symbol),
             currency=USD,
             price_precision=2,
@@ -629,7 +632,7 @@ def run_backtest(config_dict: Dict[str, Any]) -> BacktestEngine:
             
             # Convert DataFrame to NautilusTrader Bar objects
             bars = []
-            instrument_id = InstrumentId(Symbol(symbol), Venue("BINANCE"))
+            instrument_id = InstrumentId(Symbol(symbol), Venue("BACKTESTING"))
             bar_type = BarType(
                 instrument_id=instrument_id,
                 bar_spec=BarSpecification(

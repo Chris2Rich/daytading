@@ -58,32 +58,27 @@ def volatility_regime_detector(market_state: dict) -> str:
 
 SIMPLE_RF_CONFIG = {
     # Symbols to trade
-    'traded_symbols': ['AAPL', 'MSFT', 'GOOGL'],
+    'traded_symbols': ['SPY'],
     
     # Additional data for features (not traded)
-    'non_traded_timeseries': ['SPY', '^VIX'],
+    'non_traded_timeseries': ['^VIX'],
     
     # Feature engineering pipeline
     'features': [
         # Returns features
-        (features.returns_feature, {'symbol': 'AAPL', 'period': 1}),
-        (features.returns_feature, {'symbol': 'AAPL', 'period': 5}),
-        (features.returns_feature, {'symbol': 'MSFT', 'period': 1}),
-        (features.returns_feature, {'symbol': 'GOOGL', 'period': 1}),
+        (features.returns_feature, {'symbol': 'SPY', 'period': 1}),
+        (features.returns_feature, {'symbol': 'SPY', 'period': 5}),
         
         # Volatility
         (features.volatility_feature, {'symbol': 'SPY', 'window': 20}),
         
         # Momentum
-        (features.momentum_feature, {'symbol': 'AAPL', 'period': 20}),
-        (features.momentum_feature, {'symbol': 'MSFT', 'period': 20}),
+        (features.momentum_feature, {'symbol': 'SPY', 'period': 10}),
+        (features.momentum_feature, {'symbol': 'SPY', 'period': 20}),
         
         # Technical indicators
-        (features.rsi_feature, {'symbol': 'AAPL', 'period': 14}),
-        (features.macd_feature, {'symbol': 'AAPL'}),
-        
-        # Cross-sectional
-        (features.correlation_feature, {'symbols': ['AAPL', 'SPY']}),
+        (features.rsi_feature, {'symbol': 'SPY', 'period': 14}),
+        (features.macd_feature, {'symbol': 'SPY'}),
     ],
     
     # Model configuration
@@ -122,9 +117,6 @@ SIMPLE_RF_CONFIG = {
     
     # Data sources
     'data_adapters': {
-        'AAPL': YFinanceAdapter(interval='1d'),
-        'MSFT': YFinanceAdapter(interval='1d'),
-        'GOOGL': YFinanceAdapter(interval='1d'),
         'SPY': YFinanceAdapter(interval='1d'),
         '^VIX': YFinanceAdapter(interval='1d'),
     },
@@ -159,58 +151,6 @@ if __name__ == "__main__":
     # Get performance statistics
 
     # Get the account and positions
-    account = engine.trader.generate_account_report(Venue("BINANCE"))
+    account = engine.trader.generate_account_report(Venue("BACKTESTING"))
     positions = engine.trader.generate_positions_report()
     orders = engine.trader.generate_order_fills_report()
-
-    # Print summary statistics
-    print("=== STRATEGY PERFORMANCE ===")
-    print(f"Total Orders: {len(orders)}")
-    print(f"Total Positions: {len(positions)}")
-
-    if len(positions) > 0:
-        # Convert P&L strings to numeric values
-        positions["pnl_numeric"] = positions["realized_pnl"].apply(
-            lambda x: float(str(x).replace(" USD", "").replace(",", ""))
-            if isinstance(x, str)
-            else float(x)
-        )
-
-        # Calculate win rate
-        winning_trades = positions[positions["pnl_numeric"] > 0]
-        losing_trades = positions[positions["pnl_numeric"] < 0]
-
-        win_rate = len(winning_trades) / len(positions) * 100 if len(positions) > 0 else 0
-
-        print(f"\nWin Rate: {win_rate:.1f}%")
-        print(f"Winning Trades: {len(winning_trades)}")
-        print(f"Losing Trades: {len(losing_trades)}")
-
-        # Calculate returns
-        total_pnl = positions["pnl_numeric"].sum()
-        avg_pnl = positions["pnl_numeric"].mean()
-        max_win = positions["pnl_numeric"].max()
-        max_loss = positions["pnl_numeric"].min()
-
-        print(f"\nTotal P&L: {total_pnl:.2f} USD")
-        print(f"Average P&L: {avg_pnl:.2f} USD")
-        print(f"Best Trade: {max_win:.2f} USD")
-        print(f"Worst Trade: {max_loss:.2f} USD")
-
-        # Calculate risk metrics if we have both wins and losses
-        if len(winning_trades) > 0 and len(losing_trades) > 0:
-            avg_win = winning_trades["pnl_numeric"].mean()
-            avg_loss = abs(losing_trades["pnl_numeric"].mean())
-            profit_factor = winning_trades["pnl_numeric"].sum() / abs(
-                losing_trades["pnl_numeric"].sum()
-            )
-
-            print(f"\nAverage Win: {avg_win:.2f} USD")
-            print(f"Average Loss: {avg_loss:.2f} USD")
-            print(f"Profit Factor: {profit_factor:.2f}")
-            print(f"Risk/Reward Ratio: {avg_win / avg_loss:.2f}")
-        else:
-            print("\nNo positions generated. Check strategy parameters.")
-
-        print("\n=== FINAL ACCOUNT STATE ===")
-        print(account.tail(1).to_string())
