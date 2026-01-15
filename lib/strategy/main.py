@@ -8,7 +8,9 @@ from decimal import Decimal
 from pathlib import Path
 import pickle
 from datetime import datetime
+import math
 
+import numpy as np
 import pandas as pd
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.orders import MarketOrder
@@ -186,19 +188,22 @@ class MLTradingStrategy(Strategy):
 
         timestamp = pd.to_datetime(bar.ts_event, unit='ns', utc=True)
 
-        bar_data = pd.DataFrame(
-            [{
-                "open": float(bar.open),
-                "high": float(bar.high),
-                "low": float(bar.low),
-                "close": float(bar.close),
-                "volume": float(bar.volume),
-            }],
-            index=[timestamp],
-        )
-
-        self.raw_data[symbol] = pd.concat([self.raw_data[symbol], bar_data])
-        self.raw_data[symbol] = self.raw_data[symbol].iloc[-2000:]
+        if timestamp not in self.raw_data[symbol].index:
+            bar_data = pd.DataFrame(
+                [{
+                    "open": float(bar.open),
+                    "high": float(bar.high),
+                    "low": float(bar.low),
+                    "close": float(bar.close),
+                    "volume": float(bar.volume),
+                }],
+                index=[timestamp],
+            )
+            self.raw_data[symbol] = pd.concat([self.raw_data[symbol], bar_data])
+            
+            # Optional: Trim to keep memory usage low
+            if len(self.raw_data[symbol]) > 2000:
+                self.raw_data[symbol] = self.raw_data[symbol].iloc[-2000:]
 
         # ----------------------------------------------------
         # 2. Compute market features (LATEST ONLY)
@@ -238,7 +243,7 @@ class MLTradingStrategy(Strategy):
         # ----------------------------------------------------
         feature_row = {**market_features, **portfolio_features}
 
-        row_df = pd.DataFrame([feature_row], index=[bar.ts_event])
+        row_df = pd.DataFrame([feature_row], index=[timestamp])
         row_df = row_df.reindex(columns=self.feature_columns, fill_value=0.0)
 
         self.feature_df = pd.concat([self.feature_df, row_df])
@@ -348,28 +353,71 @@ class MLTradingStrategy(Strategy):
             f"Batch features: {len(feature_dfs)}, Online features: {len(self.online_features)}"
         )
 
+    def _get_portfolio_snapshot(self) -> dict[str, float]:
+        """
+        Return a portfolio snapshot for ML features using documented NautilusTrader APIs.
 
-    def _get_portfolio_snapshot(self) -> dict:
-        if not self.account:
-            equity = float(self.sys_config.starting_capital)
-            cash = equity
-            positions = {}
-        else:
-            equity = float(self.portfolio.account(self.account_id).equity())
-            cash = float(self.portfolio.account(self.account_id).cash())
+        Portfolio value (equity) is computed as:
+            equity = cash + sum(position market value + total_pnl)
+        """
 
-            positions = {
-                p.instrument_id.symbol.value: float(p.quantity)
-                for p in self.account.positions()
-            }
+        snapshot: dict[str, float] = {}
 
-        snapshot = {
-            "cash": cash,
-            "equity": equity,
-        }
+        # Edge case: no instruments mapped
+        if not self.instruments:
+            base = float(self.sys_config.starting_capital)
+            snapshot["cash"] = base
+            snapshot["equity"] = base
+            for s in self.sys_config.traded_symbols:
+                snapshot[f"position_{s}"] = 0.0
+            return snapshot
+
+        # Assume single venue
+        venue = next(iter(self.instruments.values())).venue
+
+        # ----------------------------------
+        # 1) CASH
+        # ----------------------------------
+        account = self.portfolio.account(venue)
+        if account is None:
+            raise RuntimeError(f"No account found for venue {venue}")
+
+        balance_obj = account.balance(account.base_currency)
+        cash = float(balance_obj.total) if balance_obj else 0.0
+        snapshot["cash"] = cash
+
+        # ----------------------------------
+        # 2) POSITION QUANTITIES
+        # ----------------------------------
+        for symbol in self.sys_config.traded_symbols:
+            instr_id = self.instruments[symbol]
+            qty = float(self.portfolio.net_position(instr_id))
+            snapshot[f"position_{symbol}"] = qty
+
+        # ----------------------------------
+        # 3) MARKET VALUE + TOTAL PNL → Equity
+        # ----------------------------------
+        total_equity = cash
 
         for symbol in self.sys_config.traded_symbols:
-            snapshot[f"position_{symbol}"] = positions.get(symbol, 0.0)
+            instr_id = self.instruments[symbol]
+
+            # Market value of position
+            # Use actual close price from raw data if available
+            price = 0.0
+            if symbol in self.raw_data and not self.raw_data[symbol].empty:
+                price = float(self.raw_data[symbol].iloc[-1]["close"])
+
+            position_value = snapshot[f"position_{symbol}"] * price
+
+            # Total PnL (realized + unrealized)
+            # If position is flat, this returns Money(0)
+            pnl_money = self.portfolio.total_pnl(instr_id)
+            pnl_value = float(pnl_money) if pnl_money is not None else 0.0
+
+            total_equity += position_value + pnl_value
+
+        snapshot["equity"] = total_equity
 
         return snapshot
 
@@ -395,7 +443,8 @@ class MLTradingStrategy(Strategy):
         #    For this specific config, let's grab the Returns of AAPL (period 1) 
         #    which allows us to know if price went up/down.
         
-        target_col = 'returns_AAPL_1' # From your config
+        target_symbol = self.sys_config.traded_symbols[0]
+        target_col = f"returns_{target_symbol}_1"
         
         if target_col not in train_data.columns:
             self.log.error(f"Target column {target_col} not found for training.")
@@ -446,18 +495,17 @@ class MLTradingStrategy(Strategy):
                 continue
 
             # 2. Get current position size (in Units, e.g., 50 shares)
-            position = next(
-                (p for p in self.account.positions() if p.instrument_id == instrument_id),
-                None,
+            current_quantity = self._get_portfolio_snapshot().get(
+                f"position_{symbol}", 0.0
             )
-            current_quantity = float(position.quantity) if position else 0.0
 
             # 3. Calculate target value (in Dollars)
             # The FixedFractionalSizer returns DOLLARS (e.g. 10,000.00)
+
             target_value = self.position_sizer.calculate_size(
                 signal=signal,
                 current_position=current_quantity, # Sizer expects units? No, let's look at logic below.
-                portfolio_value=float(self.portfolio.account(self.account_id).equity()),
+                portfolio_value=self._get_portfolio_snapshot()["equity"],
                 instrument_id=instrument_id
             )
             
@@ -487,7 +535,8 @@ class MLTradingStrategy(Strategy):
                 order_side=order_side,
                 quantity=Decimal(str(order_quantity)),
                 time_in_force=TimeInForce.GTC,
-                init_id=self.generate_order_id()
+                venue=instrument_id.venue,
+                ts_event=int(pd.Timestamp.utcnow().timestamp() * 1e9),
             )
             
             self.submit_order(order)
