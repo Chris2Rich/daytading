@@ -137,6 +137,30 @@ class MLTradingStrategy(Strategy):
         self.account_id = self.account.id
         self.log.info(f"Using account: {self.account_id}")
         
+        for instrument in self.cache.instruments():
+            self.instruments[instrument.symbol.value] = instrument.id
+            self.log.info(f"Mapped {instrument.symbol.value} to {instrument.id}")
+
+        for symbol in self.sys_config.traded_symbols:
+            instrument_id = self.instruments.get(symbol)
+            if instrument_id:
+                # You must construct the EXACT BarType that was added to the engine.
+                # Based on your logs and run_backtest code, it is 1-MINUTE-LAST-EXTERNAL.
+                bar_type = BarType(
+                    instrument_id=instrument_id,
+                    bar_spec=BarSpecification(
+                        step=1,
+                        aggregation=BarAggregation.MINUTE,
+                        price_type=PriceType.LAST
+                    ),
+                    aggregation_source=AggregationSource.EXTERNAL
+                )
+                
+                self.subscribe_bars(bar_type) # <--- Passing BarType object now
+                self.log.info(f"Subscribed to {bar_type}")
+            else:
+                self.log.error(f"Could not subscribe: No instrument ID for {symbol}")
+
         self.log.info("Starting ML Trading Strategy")
         
         # Step 1: Load historical data from all adapters
@@ -149,6 +173,7 @@ class MLTradingStrategy(Strategy):
         
         # Step 3: Train initial model
         self._train_model(initial=True) 
+
     def on_bar(self, bar: Bar):
         self.bar_count += 1
 
@@ -159,6 +184,8 @@ class MLTradingStrategy(Strategy):
         if symbol not in self.raw_data:
             self.raw_data[symbol] = pd.DataFrame()
 
+        timestamp = pd.to_datetime(bar.ts_event, unit='ns', utc=True)
+
         bar_data = pd.DataFrame(
             [{
                 "open": float(bar.open),
@@ -167,7 +194,7 @@ class MLTradingStrategy(Strategy):
                 "close": float(bar.close),
                 "volume": float(bar.volume),
             }],
-            index=[bar.ts_event],
+            index=[timestamp],
         )
 
         self.raw_data[symbol] = pd.concat([self.raw_data[symbol], bar_data])
@@ -178,13 +205,25 @@ class MLTradingStrategy(Strategy):
         # ----------------------------------------------------
         market_features = {}
 
-        for feature_func, params in self.online_features:
+        for feature_func, params in self.sys_config.features:
+            # We pass the current raw_data (which includes the new bar)
             feature_value = feature_func(self.raw_data, **params)
 
             if isinstance(feature_value, pd.Series):
-                feature_value = feature_value.to_frame(name=feature_func.__name__)
-
-            market_features.update(feature_value.iloc[-1].to_dict())
+                # We only want the specific value for THIS timestamp
+                # Note: feature functions return a Series with datetime index.
+                # We grab the very last value (-1).
+                val = feature_value.iloc[-1]
+                # Handle cases where feature name might differ from func name
+                # (Your feature functions return Series with specific names, 
+                # e.g. 'rsi_AAPL_14', so we extract that name)
+                name = feature_value.name if feature_value.name else feature_func.__name__
+                market_features[name] = float(val)
+                
+            elif isinstance(feature_value, pd.DataFrame):
+                # For functions returning DataFrames (like MACD, Bollinger Bands)
+                last_row = feature_value.iloc[-1]
+                market_features.update(last_row.to_dict())
 
         # ----------------------------------------------------
         # 3. Snapshot portfolio state (AFTER previous fills)
@@ -398,31 +437,49 @@ class MLTradingStrategy(Strategy):
             if not instrument_id:
                 continue
             
-            # Calculate position size using position sizer
+            # 1. Get current price (Last known close)
+            # We need this to convert $ amount to # of shares
+            last_bar = self.raw_data[symbol].iloc[-1]
+            current_price = float(last_bar['close'])
+            
+            if current_price <= 0:
+                continue
+
+            # 2. Get current position size (in Units, e.g., 50 shares)
             position = next(
                 (p for p in self.account.positions() if p.instrument_id == instrument_id),
                 None,
             )
             current_quantity = float(position.quantity) if position else 0.0
 
-            
-            target_quantity = self.position_sizer.calculate_size(
+            # 3. Calculate target value (in Dollars)
+            # The FixedFractionalSizer returns DOLLARS (e.g. 10,000.00)
+            target_value = self.position_sizer.calculate_size(
                 signal=signal,
-                current_position=current_quantity,
+                current_position=current_quantity, # Sizer expects units? No, let's look at logic below.
                 portfolio_value=float(self.portfolio.account(self.account_id).equity()),
                 instrument_id=instrument_id
             )
             
-            # Determine order side and quantity
+            # 4. Convert Target Value ($) to Target Quantity (Units)
+            # Check sizer type logic: FixedFractional returns Value.
+            # FixedSizer returns Units. 
+            # We need to handle this based on your sizer implementation.
+            # Assuming FixedFractionalSizer is used (which returns value):
+            target_quantity = target_value / current_price
+            
+            # 5. Calculate delta and submit
             quantity_delta = target_quantity - current_quantity
             
-            if abs(quantity_delta) < 1e-6:  # No change needed
+            if abs(quantity_delta) < 1.0:  # Minimum 1 share change
                 continue
             
             order_side = OrderSide.BUY if quantity_delta > 0 else OrderSide.SELL
             order_quantity = abs(quantity_delta)
             
-            # Submit market order
+            # Round to nearest integer (assuming lot_size=1)
+            order_quantity = int(order_quantity)
+            
             order = MarketOrder(
                 trader_id=self.trader_id,
                 strategy_id=self.id,
@@ -434,8 +491,8 @@ class MLTradingStrategy(Strategy):
             )
             
             self.submit_order(order)
-            self.log.info(f"Submitted {order_side} order for {symbol}: {order_quantity}")
-    
+            self.log.info(f"Submitted {order_side} order for {symbol}: {order_quantity} shares @ ~{current_price}")
+
     def _should_retrain(self) -> bool:
         """Determine if model should be retrained."""
         bars_since_retrain = self.bar_count - self.last_retrain_bar
