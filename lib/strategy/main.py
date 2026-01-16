@@ -72,10 +72,6 @@ class TradingSystemConfig:
         self.training_window_type: str = config_dict.get('training_window_type', 'expanding')  # or 'rolling'
         self.training_window_size: Optional[int] = config_dict.get('training_window_size', None)
         
-        # Regime detection callback (optional)
-        self.regime_detector: Optional[Callable] = config_dict.get('regime_detector', None)
-        self.regime_check_frequency: int = config_dict.get('regime_check_frequency', 20)
-        
         # Data adapter configuration
         self.data_adapters: Dict[str, BaseAdapter] = config_dict['data_adapters']
         
@@ -116,7 +112,6 @@ class MLTradingStrategy(Strategy):
         
         # State tracking
         self.bar_count: int = 0
-        self.current_regime: Optional[Any] = None
         self.last_retrain_bar: int = 0
         
         # Instrument mapping
@@ -249,21 +244,6 @@ class MLTradingStrategy(Strategy):
         row_df = row_df.reindex(columns=self.feature_columns, fill_value=0.0)
 
         self.feature_df = pd.concat([self.feature_df, row_df])
-
-        # ----------------------------------------------------
-        # 5. Regime detection (optional)
-        # ----------------------------------------------------
-        if (
-            self.sys_config.regime_detector
-            and self.bar_count % self.sys_config.regime_check_frequency == 0
-        ):
-            new_regime = self._check_regime()
-            if new_regime != self.current_regime:
-                self.log.info(
-                    f"Regime change detected: {self.current_regime} -> {new_regime}"
-                )
-                self.current_regime = new_regime
-                self._handle_regime_change()
 
         # ----------------------------------------------------
         # 6. Generate signals
@@ -463,7 +443,7 @@ class MLTradingStrategy(Strategy):
         # Simple binary classification: 1 if Up, 0 if Down
         y = np.where(y_raw > 0, 2, 0) # 2=Buy, 0=Sell (matching your Random Forest logic)
         
-        self.model.train(X, y=y, metadata={'regime': self.current_regime})
+        self.model.train(X, y=y)
         
         self.log.info("Model training complete")
     
@@ -550,32 +530,13 @@ class MLTradingStrategy(Strategy):
         bars_since_retrain = self.bar_count - self.last_retrain_bar
         return bars_since_retrain >= self.sys_config.retrain_frequency
     
-    def _check_regime(self) -> Any:
-        """Check current market regime using regime detector."""
-        if self.sys_config.regime_detector is None:
-            return None
-        
-        market_state = {
-            'raw_data': self.raw_data,
-            'features': self.feature_df,
-            'bar_count': self.bar_count
-        }
-        
-        return self.sys_config.regime_detector(market_state)
-    
-    def _handle_regime_change(self):
-        """Handle regime change event (e.g., trigger retraining)."""
-        self.log.info("Handling regime change - triggering model retraining")
-        self._train_model(initial=False)
-        self.last_retrain_bar = self.bar_count
-    
     def _save_model(self):
         """Save trained model to disk."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         model_path = self.sys_config.model_save_path / f"model_{timestamp}.pkl"
         
         with open(model_path, 'wb') as f:
-            pickle.dump(self.model, f)
+            pickle.dump({"model": self.model, "config": self.sys_config}, f)
         
         self.log.info(f"Model saved to {model_path}")
 

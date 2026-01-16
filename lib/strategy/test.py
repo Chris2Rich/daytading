@@ -17,41 +17,6 @@ from position_sizers import (
 )
 import features
 
-
-# ============================================================================
-# Regime Detection Callback
-# ============================================================================
-
-def volatility_regime_detector(market_state: dict) -> str:
-    """
-    Detect market regime based on volatility levels.
-    
-    Args:
-        market_state: Dict containing 'raw_data', 'features', 'bar_count'
-        
-    Returns:
-        Regime identifier ('high_vol', 'normal', 'low_vol')
-    """
-    import numpy as np
-    
-    # Get SPY volatility from features
-    feature_df = market_state['features']
-    
-    if 'volatility_SPY_20' not in feature_df.columns:
-        return 'normal'
-    
-    # Get recent volatility
-    recent_vol = feature_df['volatility_SPY_20'].iloc[-20:].mean()
-    
-    # Define regime thresholds
-    if recent_vol > 0.25:
-        return 'high_vol'
-    elif recent_vol < 0.15:
-        return 'low_vol'
-    else:
-        return 'normal'
-
-
 # ============================================================================
 # Configuration 1: Simple Random Forest Strategy
 # ============================================================================
@@ -71,10 +36,18 @@ SIMPLE_RF_CONFIG = {
         
         # Volatility
         (features.volatility_feature, {'symbol': 'SPY', 'window': 20}),
+
+        (features.volatility_feature, {'symbol': '^VIX', 'window': 20}),
         
         # Momentum
         (features.momentum_feature, {'symbol': 'SPY', 'period': 10}),
         (features.momentum_feature, {'symbol': 'SPY', 'period': 20}),
+
+        (features.regime_feature, {'symbol': 'SPY', 'window': 10}),
+        (features.regime_feature, {'symbol': 'SPY', 'window': 30}),
+        (features.regime_feature, {'symbol': 'SPY', 'window': 180}),
+
+        (features.regime_feature, {'symbol': '^VIX', 'window': 30}),
         
         # Technical indicators
         (features.rsi_feature, {'symbol': 'SPY', 'period': 14}),
@@ -108,12 +81,9 @@ SIMPLE_RF_CONFIG = {
     },
     
     # Retraining schedule
-    'retrain_frequency': 252,  # Retrain yearly (252 trading days)
+    'retrain_frequency': 126,  # Retrain 2x a year
     'training_window_type': 'rolling',
-    
-    # Regime detection
-    'regime_detector': volatility_regime_detector,
-    'regime_check_frequency': 20,  # Check every 20 bars
+    'training_window_size': 126,
     
     # Data sources
     'data_adapters': {
