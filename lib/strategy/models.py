@@ -189,32 +189,34 @@ class RandomForestModel(BaseModel):
         self.model.fit(X, y)
         self.is_trained = True
 
-    def predict(self, X: np.ndarray, symbol: Optional[str] = None) -> SignalOutput:
-        """Predict trading action using Random Forest."""
+    def predict(self, X: np.ndarray, symbol: str = None) -> SignalOutput:
         if not self.is_trained:
-            return SignalOutput(
-                output_type=self.output_type,
-                action=TradingAction.HOLD,
-                risk_factor=0.0
-            )
+            return SignalOutput(self.output_type, TradingAction.HOLD, 0.0)
+
+        # Get probabilities: [prob_Stop, prob_Hold, prob_Profit]
+        # corresponding to classes [0, 1, 2]
+        probs = self.model.predict_proba(X)[0]
         
-        # Get prediction and probability
-        pred_class = self.model.predict(X)[0]
-        pred_proba = self.model.predict_proba(X)[0]
+        # Argmax to get class
+        pred_class = np.argmax(probs)
+        confidence = probs[pred_class]
         
-        # Map prediction to action
-        action_map = {0: TradingAction.SELL, 1: TradingAction.HOLD, 2: TradingAction.BUY}
-        action = action_map.get(pred_class, TradingAction.HOLD)
+        action_map = {
+            0: TradingAction.SELL, # Predicted hitting Stop Loss
+            1: TradingAction.HOLD, # Predicted Time Limit (Neutral)
+            2: TradingAction.BUY   # Predicted hitting Profit Take
+        }
         
-        # Use prediction confidence as risk factor
-        confidence = np.max(pred_proba)
-        risk_factor = confidence
-        
+        # Optional: Thresholding
+        # Only trade if confidence > 0.4 (assuming 3 classes, baseline is 0.33)
+        if confidence < 0.4:
+            return SignalOutput(self.output_type, TradingAction.HOLD, 0.0)
+
         return SignalOutput(
             output_type=self.output_type,
-            action=action,
-            risk_factor=risk_factor,
-            confidence=confidence
+            action=action_map.get(pred_class, TradingAction.HOLD),
+            risk_factor=float(confidence), # Pass confidence to position sizer
+            confidence=float(confidence)
         )
     
     def save_state(self, path: str):

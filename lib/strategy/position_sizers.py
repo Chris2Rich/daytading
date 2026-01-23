@@ -88,36 +88,34 @@ class FixedFractionalSizer(BasePositionSizer):
     
     def calculate_size(self, signal: SignalOutput, current_position: float,
                       portfolio_value: float, instrument_id: InstrumentId) -> float:
-        """Calculate position size as fraction of portfolio."""
-        # Calculate base allocation
+        
         base_allocation = portfolio_value * self.fraction
         
-        # Scale by risk factor if enabled
         if self.use_risk_factor:
             base_allocation *= signal.risk_factor
         
-        # Determine direction based on signal type
         if signal.output_type == ModelOutputType.ACTION:
             if signal.action == TradingAction.BUY:
-                # Convert dollar allocation to units (simplified - would need price)
-                # For now, return dollar allocation (caller handles conversion)
                 return base_allocation
             elif signal.action == TradingAction.SELL:
                 return -base_allocation
             elif signal.action == TradingAction.FLATTEN:
                 return 0.0
             else:  # HOLD
+                # CHANGE: If we are holding, do we maintain position or reduce it?
+                # Option A: Maintain (Status Quo) -> return current_position
+                # Option B: Exit if confidence is low.
+                
+                # If the model predicts HOLD, it implies it doesn't see a barrier hit.
+                # If you want to trade more actively, you can treat HOLD as "Go Flat" 
+                # or "Reduce Position".
+                
+                # For now, let's allow the strategy to close if confidence is low 
+                # even on a HOLD signal (effectively a soft exit).
+                if signal.confidence and signal.confidence < 0.4:
+                     return current_position * 0.75 # Close position if model is unsure
+                
                 return current_position
-        
-        elif signal.output_type == ModelOutputType.TARGET_PRICE:
-            # Calculate position based on current vs target price
-            # Implementation depends on current market price
-            # Placeholder: maintain current position
-            return current_position
-        
-        else:  # THRESHOLDS
-            # Would implement threshold-based sizing logic
-            return current_position
 
 
 class KellyCriterionSizer(BasePositionSizer):

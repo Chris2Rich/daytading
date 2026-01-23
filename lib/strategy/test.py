@@ -32,26 +32,17 @@ SIMPLE_RF_CONFIG = {
     'features': [
         # Returns features
         (features.returns_feature, {'symbol': 'SPY', 'period': 1}),
-        (features.returns_feature, {'symbol': 'SPY', 'period': 5}),
         
         # Volatility
         (features.volatility_feature, {'symbol': 'SPY', 'window': 20}),
-
-        (features.volatility_feature, {'symbol': '^VIX', 'window': 20}),
         
         # Momentum
         (features.momentum_feature, {'symbol': 'SPY', 'period': 10}),
-        (features.momentum_feature, {'symbol': 'SPY', 'period': 20}),
 
         (features.regime_feature, {'symbol': 'SPY', 'window': 10}),
-        (features.regime_feature, {'symbol': 'SPY', 'window': 30}),
         (features.regime_feature, {'symbol': 'SPY', 'window': 180}),
 
         (features.regime_feature, {'symbol': '^VIX', 'window': 30}),
-        
-        # Technical indicators
-        (features.rsi_feature, {'symbol': 'SPY', 'period': 14}),
-        (features.macd_feature, {'symbol': 'SPY'}),
     ],
     
     # Model configuration
@@ -59,9 +50,9 @@ SIMPLE_RF_CONFIG = {
     'model_output_type': ModelOutputType.ACTION,
     'model_params': {
         'output_type': ModelOutputType.ACTION,
-        'n_estimators': 25,
-        'max_depth': 5,
-        'min_samples_split': 5,
+        'n_estimators': 100,
+        'max_depth': 7,
+        'min_samples_split': 12,
     },
     
     # Backtest period
@@ -76,14 +67,14 @@ SIMPLE_RF_CONFIG = {
     # Position sizing
     'position_sizer_type': FixedFractionalSizer,
     'position_sizer_params': {
-        'fraction': 0.10,  # 10% per position
+        'fraction': 0.15,  # 10% per position
         'use_risk_factor': True,
     },
     
     # Retraining schedule
-    'retrain_frequency': 126,  # Retrain 2x a year
+    'retrain_frequency': 21,  # Retrain 2x a year
     'training_window_type': 'rolling',
-    'training_window_size': 126,
+    'training_window_size': 252,
     
     # Data sources
     'data_adapters': {

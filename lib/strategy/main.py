@@ -99,8 +99,9 @@ class MLTradingStrategy(Strategy):
         self.sys_config = config
         
         # Model instance
-        self.model: BaseModel = config.model_type(**config.model_params)
-        
+        self.models: Dict[str, BaseModel] = {}
+        self.models_trained: bool = False
+
         # Position sizer
         self.position_sizer: BasePositionSizer = config.position_sizer_type(
             **config.position_sizer_params
@@ -230,7 +231,7 @@ class MLTradingStrategy(Strategy):
         # ----------------------------------------------------
         # 3. Snapshot portfolio state (AFTER previous fills)
         # ----------------------------------------------------
-        if not self.model.is_trained:
+        if not self.models_trained:
             portfolio_features = {}
         else:
             portfolio_features = self._get_portfolio_snapshot()
@@ -335,6 +336,57 @@ class MLTradingStrategy(Strategy):
             f"Batch features: {len(feature_dfs)}, Online features: {len(self.online_features)}"
         )
 
+    def _compute_triple_barrier_targets(self, symbol: str, df: pd.DataFrame, horizon: int = 10, profit_taking: float = 0.02, stop_loss: float = 0.01) -> pd.Series:
+        if symbol not in self.raw_data:
+            return pd.Series(index=df.index, data=np.nan)
+            
+        # Get raw prices aligned to feature index
+        prices = self.raw_data[symbol].reindex(df.index).fillna(method='ffill')
+        
+        # KEY FIX: Shift prices back by 1.
+        # The 'future' for Bar T starts at Bar T+1.
+        next_bars_high = prices['high'].shift(-1)
+        next_bars_low = prices['low'].shift(-1)
+        
+        # Setup forward looking window
+        # We look at the NEXT 'horizon' bars.
+        indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=horizon)
+        
+        # 1. Get Max High and Min Low of the FUTURE window
+        # Because we shifted by -1, the window at index T now covers [T+1, ..., T+horizon]
+        future_highs = next_bars_high.rolling(window=indexer).max()
+        future_lows = next_bars_low.rolling(window=indexer).min()
+        
+        # 2. Define Barriers based on Close at T
+        current_close = prices['close']
+        upper_barrier = current_close * (1 + profit_taking)
+        lower_barrier = current_close * (1 - stop_loss)
+        
+        # 3. Determine touches
+        # Note: In a real rigorous TBM, we'd check which barrier was hit FIRST.
+        # This vectorized approximation assumes if both are hit in the window, it's a Stop Loss (conservative).
+        
+        touch_upper = future_highs > upper_barrier
+        touch_lower = future_lows < lower_barrier
+        
+        # 4. Generate Labels
+        # Default = 1 (Time Limit / Hold)
+        y = pd.Series(1, index=df.index)
+        
+        # If lower barrier hit -> 0 (Sell/Stop)
+        # We prioritize Stop Loss: if volatility triggers both, assume we got stopped out.
+        y[touch_lower] = 0
+        
+        # If upper barrier hit AND lower NOT hit -> 2 (Buy/Profit)
+        y[touch_upper & ~touch_lower] = 2
+        
+        # 5. Clean up NaNs
+        # The last 'horizon' rows will be NaN because we don't have future data for them yet.
+        # We must drop them during training.
+        y = y.dropna()
+        
+        return y
+
     def _get_portfolio_snapshot(self) -> dict[str, float]:
         """
         Return a portfolio snapshot for ML features using documented NautilusTrader APIs.
@@ -405,58 +457,89 @@ class MLTradingStrategy(Strategy):
 
 
     def _train_model(self, initial: bool = False):
-        """Train or retrain the model on available data."""
-        if self.feature_df is None or len(self.feature_df) < 100:
-            self.log.warning("Insufficient data for training")
-            return
-        
-        # Determine training window
-        if initial or self.sys_config.training_window_type == 'expanding':
-            train_data = self.feature_df
-        else:
-            window_size = self.sys_config.training_window_size or len(self.feature_df)
-            train_data = self.feature_df.iloc[-window_size:]
-        
-        self.log.info(f"Training model on {len(train_data)} samples")
-        
-        # --- IMPROVED TARGET GENERATION ---
-        # 1. Get Close prices for the assets (assuming AAPL for this example, 
-        #    ideally you loop through symbols or train one model per symbol)
-        #    For this specific config, let's grab the Returns of AAPL (period 1) 
-        #    which allows us to know if price went up/down.
-        
-        target_symbol = self.sys_config.traded_symbols[0]
-        target_col = f"returns_{target_symbol}_1"
-        
-        if target_col not in train_data.columns:
-            self.log.error(f"Target column {target_col} not found for training.")
+        if self.feature_df is None or len(self.feature_df) < 200:
             return
 
-        # Shift returns backwards by 1 to predict *Next* bar's return using *Current* bar's features
-        # y = 1 (Buy) if next return > 0, else 0 (Sell/Hold)
-        future_returns = train_data[target_col].shift(-1)
-        
-        # Drop the last row (NaN target) from both X and y
-        X = train_data.iloc[:-1].values
-        y_raw = future_returns.iloc[:-1].values
-        
-        # Simple binary classification: 1 if Up, 0 if Down
-        y = np.where(y_raw > 0, 2, 0) # 2=Buy, 0=Sell (matching your Random Forest logic)
-        
-        self.model.train(X, y=y)
-        
-        self.log.info("Model training complete")
-    
-    def _generate_signals(self) -> Dict[str, SignalOutput]:
-        """Generate trading signals for all symbols using trained model."""
-        signals = {}
-        
-        # Get current features (latest row)
-        current_features = self.feature_df.iloc[-1:].values
-        
+        # 1. Select Training Data Window
+        if initial or self.sys_config.training_window_type == 'expanding':
+            train_df = self.feature_df
+        else:
+            ws = self.sys_config.training_window_size or 500
+            train_df = self.feature_df.iloc[-ws:]
+
+        # 2. Iterate over each traded symbol
         for symbol in self.sys_config.traded_symbols:
-            # Model predicts signal for each symbol
-            signal = self.model.predict(current_features, symbol=symbol)
+            
+            # --- A. Filter Features for THIS symbol ---
+            # Grab columns like 'rsi_AAPL' and generic columns like 'VIX'
+            # Exclude columns belonging to OTHER traded assets (e.g. 'rsi_MSFT')
+            other_symbols = set(self.sys_config.traded_symbols) - {symbol}
+            
+            # Create boolean mask for columns to keep
+            cols_to_keep = []
+            for col in train_df.columns:
+                # If column has another symbol name in it, skip it
+                if any(os in col for os in other_symbols):
+                    continue
+                cols_to_keep.append(col)
+                
+            X_df = train_df[cols_to_keep]
+            
+            # --- B. Compute Targets (Ground Truth) ---
+            # This looks at future data (T+1 onwards) to create the label
+            y_series = self._compute_triple_barrier_targets(
+                symbol, 
+                train_df, 
+                horizon=10, 
+                profit_taking=0.015, 
+                stop_loss=0.01
+            )
+            
+            # --- C. Align and Clean ---
+            # y_series is shorter than X_df by 'horizon' rows (at the end)
+            common_idx = X_df.index.intersection(y_series.index)
+            
+            if len(common_idx) < 100:
+                continue
+
+            X_final = X_df.loc[common_idx].values
+            y_final = y_series.loc[common_idx].values
+            
+            # --- D. Train Symbol-Specific Model ---
+            self.log.info(f"Training model for {symbol} | Samples: {len(X_final)}")
+            
+            # Ensure you initialized self.models = {} in __init__
+            if symbol not in self.models:
+                # Create new instance if missing
+                self.models[symbol] = self.sys_config.model_type(**self.sys_config.model_params)
+                
+            self.models[symbol].train(X_final, y=y_final)
+            
+        self.models_trained = True
+
+    def _generate_signals(self) -> Dict[str, SignalOutput]:
+        signals = {}
+        if not hasattr(self, 'models_trained') or not self.models_trained:
+            return signals
+
+        # Latest feature row
+        last_idx = self.feature_df.index[-1]
+        last_row = self.feature_df.iloc[-1:]
+
+        for symbol in self.sys_config.traded_symbols:
+            if symbol not in self.models:
+                continue
+
+            # 1. Filter features exactly like in training
+            other_symbols = set(self.sys_config.traded_symbols) - {symbol}
+            cols_to_keep = [c for c in last_row.columns if not any(os in c for os in other_symbols)]
+            
+            X_live = last_row[cols_to_keep].values
+
+            # 2. Predict
+            # Returns SignalOutput with Action and Risk Factor (Confidence)
+            signal = self.models[symbol].predict(X_live)
+            
             signals[symbol] = signal
             
         return signals
@@ -536,7 +619,13 @@ class MLTradingStrategy(Strategy):
         model_path = self.sys_config.model_save_path / f"model_{timestamp}.pkl"
         
         with open(model_path, 'wb') as f:
-            pickle.dump({"model": self.model, "config": self.sys_config}, f)
+            pickle.dump(
+                {
+                    "models": self.models,
+                    "config": self.sys_config,
+                },
+                f,
+            )
         
         self.log.info(f"Model saved to {model_path}")
 
