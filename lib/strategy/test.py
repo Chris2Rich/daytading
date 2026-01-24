@@ -6,9 +6,10 @@ This demonstrates how to set up a full trading strategy with all components.
 from datetime import datetime
 from pathlib import Path
 from nautilus_trader.model.identifiers import Venue
+from uuid import uuid4
 
 # Import all necessary components
-from main import run_backtest
+from main import run_backtest, set_global_seed
 from models import RandomForestModel, ModelOutputType
 from adapters import YFinanceAdapter
 from position_sizers import (
@@ -22,6 +23,9 @@ import features
 # ============================================================================
 
 SIMPLE_RF_CONFIG = {
+    'seed': 42,
+    "id": uuid4(),
+
     # Symbols to trade
     'traded_symbols': ['SPY'],
     

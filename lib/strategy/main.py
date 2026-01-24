@@ -39,6 +39,9 @@ class TradingSystemConfig:
     """
     
     def __init__(self, config_dict: Dict[str, Any]):
+        self.seed: int = config_dict['seed']
+        self.id: py_uuid4 = config_dict['id']
+
         # Traded instruments
         self.traded_symbols: List[str] = config_dict['traded_symbols']
         
@@ -725,3 +728,7 @@ def run_backtest(config_dict: Dict[str, Any]) -> BacktestEngine:
     engine.run()
     
     return engine
+
+def set_global_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
