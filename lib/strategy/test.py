@@ -69,14 +69,10 @@ SIMPLE_RF_CONFIG = {
     'max_leverage': 1.0,  # No leverage
     
     # Position sizing
-    'position_sizer_type': FixedFractionalSizer,
-    'position_sizer_params': {
-        'fraction': 0.15,  # 10% per position
-        'use_risk_factor': True,
-    },
-    
+    'position_sizer_type': KellyCriterionSizer,
+
     # Retraining schedule
-    'retrain_frequency': 21,  # Retrain 2x a year
+    'retrain_frequency': 252,  # Retrain 12x a year
     'training_window_type': 'rolling',
     'training_window_size': 252,
     
