@@ -93,6 +93,74 @@ class Database:
                 ON portfolio_cache(clerk_user_id, last_fetched_at DESC)
             """)
 
+            # Strategies table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS strategies (
+                    strategy_id UUID PRIMARY KEY,
+                    clerk_user_id TEXT NOT NULL REFERENCES users(clerk_user_id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    config JSONB NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'draft' 
+                        CHECK (status IN ('draft', 'backtesting', 'completed', 'failed')),
+                    tags TEXT[] DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_strategies_clerk_user_id 
+                ON strategies(clerk_user_id, updated_at DESC)
+            """)
+
+            # Backtest results table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS backtest_results (
+                    backtest_id UUID PRIMARY KEY,
+                    strategy_id UUID NOT NULL REFERENCES strategies(strategy_id) ON DELETE CASCADE,
+                    clerk_user_id TEXT NOT NULL REFERENCES users(clerk_user_id) ON DELETE CASCADE,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+                    error_message TEXT,
+                    started_at TIMESTAMPTZ,
+                    completed_at TIMESTAMPTZ,
+                    duration_seconds INT,
+                    starting_capital NUMERIC,
+                    ending_capital NUMERIC,
+                    portfolio JSONB,
+                    risk JSONB,
+                    equity_curve JSONB,
+                    drawdown_curve JSONB,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_backtest_results_strategy_id 
+                ON backtest_results(strategy_id, created_at DESC)
+            """)
+
+            # Trades table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    trade_id UUID PRIMARY KEY,
+                    backtest_id UUID NOT NULL REFERENCES backtest_results(backtest_id) ON DELETE CASCADE,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+                    quantity NUMERIC NOT NULL,
+                    price NUMERIC NOT NULL,
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    pnl NUMERIC,
+                    pnl_percent NUMERIC
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_trades_backtest_id 
+                ON trades(backtest_id, timestamp DESC)
+            """)
+
     async def ensure_user(self, clerk_user_id: str):
         """Create user if doesn't exist"""
         async with self.pool.acquire() as conn:
@@ -318,3 +386,291 @@ class Database:
             now = datetime.now(timezone.utc)
             age = now - last_fetched
             return age.total_seconds()
+
+    # ============================================================================
+    # Strategy Methods
+    # ============================================================================
+
+    async def create_strategy(self, clerk_user_id: str, name: str, description: str, 
+                              config: Dict[str, Any], tags: List[str] = None) -> str:
+        """Create a new strategy"""
+        strategy_id = str(uuid.uuid4())
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO strategies (strategy_id, clerk_user_id, name, description, config, tags)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            """, strategy_id, clerk_user_id, name, description, 
+                json.dumps(config), tags or [])
+        return strategy_id
+
+    async def get_strategy(self, strategy_id: str, clerk_user_id: str) -> Optional[Dict[str, Any]]:
+        """Get a strategy by ID, verifying ownership"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT strategy_id, clerk_user_id, name, description, config, status, tags,
+                       created_at, updated_at
+                FROM strategies
+                WHERE strategy_id = $1 AND clerk_user_id = $2
+            """, strategy_id, clerk_user_id)
+            
+            if not row:
+                return None
+            
+            result = dict(row)
+            # Parse JSON config
+            if isinstance(result['config'], str):
+                result['config'] = json.loads(result['config'])
+            return result
+
+    async def get_user_strategies(self, clerk_user_id: str) -> List[Dict[str, Any]]:
+        """List all strategies for a user"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT strategy_id, clerk_user_id, name, description, config, status, tags,
+                       created_at, updated_at
+                FROM strategies
+                WHERE clerk_user_id = $1
+                ORDER BY updated_at DESC
+            """, clerk_user_id)
+            
+            results = []
+            for row in rows:
+                result = dict(row)
+                if isinstance(result['config'], str):
+                    result['config'] = json.loads(result['config'])
+                results.append(result)
+            return results
+
+    async def update_strategy(self, strategy_id: str, clerk_user_id: str,
+                              name: str = None, description: str = None,
+                              config: Dict[str, Any] = None, 
+                              status: str = None,
+                              tags: List[str] = None) -> bool:
+        """Update a strategy, verifying ownership"""
+        async with self.pool.acquire() as conn:
+            # Build dynamic update query
+            updates = []
+            params = [strategy_id, clerk_user_id]
+            param_idx = 3
+            
+            if name is not None:
+                updates.append(f"name = ${param_idx}")
+                params.append(name)
+                param_idx += 1
+            
+            if description is not None:
+                updates.append(f"description = ${param_idx}")
+                params.append(description)
+                param_idx += 1
+            
+            if config is not None:
+                updates.append(f"config = ${param_idx}")
+                params.append(json.dumps(config))
+                param_idx += 1
+            
+            if status is not None:
+                updates.append(f"status = ${param_idx}")
+                params.append(status)
+                param_idx += 1
+            
+            if tags is not None:
+                updates.append(f"tags = ${param_idx}")
+                params.append(tags)
+                param_idx += 1
+            
+            if not updates:
+                return True  # Nothing to update
+            
+            updates.append("updated_at = NOW()")
+            
+            query = f"""
+                UPDATE strategies
+                SET {', '.join(updates)}
+                WHERE strategy_id = $1 AND clerk_user_id = $2
+                RETURNING strategy_id
+            """
+            
+            result = await conn.fetchval(query, *params)
+            return result is not None
+
+    async def delete_strategy(self, strategy_id: str, clerk_user_id: str) -> bool:
+        """Delete a strategy, verifying ownership"""
+        async with self.pool.acquire() as conn:
+            result = await conn.execute("""
+                DELETE FROM strategies
+                WHERE strategy_id = $1 AND clerk_user_id = $2
+            """, strategy_id, clerk_user_id)
+            # result is a string like "DELETE 1" or "DELETE 0"
+            return "DELETE 1" in result
+
+    async def verify_strategy_ownership(self, strategy_id: str, clerk_user_id: str) -> bool:
+        """Verify that a user owns a strategy"""
+        async with self.pool.acquire() as conn:
+            owner = await conn.fetchval("""
+                SELECT clerk_user_id FROM strategies WHERE strategy_id = $1
+            """, strategy_id)
+            return owner == clerk_user_id if owner else False
+
+    # ============================================================================
+    # Backtest Results Methods
+    # ============================================================================
+
+    async def create_backtest(self, strategy_id: str, clerk_user_id: str) -> str:
+        """Create a new backtest record"""
+        backtest_id = str(uuid.uuid4())
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO backtest_results (backtest_id, strategy_id, clerk_user_id, status, started_at)
+                VALUES ($1, $2, $3, 'pending', NOW())
+            """, backtest_id, strategy_id, clerk_user_id)
+        return backtest_id
+
+    async def update_backtest_status(self, backtest_id: str, clerk_user_id: str,
+                                     status: str, error_message: str = None) -> bool:
+        """Update backtest status"""
+        async with self.pool.acquire() as conn:
+            if status == 'completed' or status == 'failed':
+                result = await conn.execute("""
+                    UPDATE backtest_results
+                    SET status = $3, error_message = $4, completed_at = NOW()
+                    WHERE backtest_id = $1 AND clerk_user_id = $2
+                """, backtest_id, clerk_user_id, status, error_message)
+            else:
+                result = await conn.execute("""
+                    UPDATE backtest_results
+                    SET status = $3, error_message = $4
+                    WHERE backtest_id = $1 AND clerk_user_id = $2
+                """, backtest_id, clerk_user_id, status, error_message)
+            return "UPDATE 1" in result
+
+    async def update_backtest_results(self, backtest_id: str, clerk_user_id: str,
+                                      results: Dict[str, Any]) -> bool:
+        """Update backtest with full results"""
+        async with self.pool.acquire() as conn:
+            result = await conn.execute("""
+                UPDATE backtest_results
+                SET status = 'completed',
+                    completed_at = NOW(),
+                    duration_seconds = $3,
+                    starting_capital = $4,
+                    ending_capital = $5,
+                    portfolio = $6,
+                    risk = $7,
+                    equity_curve = $8,
+                    drawdown_curve = $9
+                WHERE backtest_id = $1 AND clerk_user_id = $2
+            """, backtest_id, clerk_user_id,
+                results.get('duration_seconds'),
+                results.get('starting_capital'),
+                results.get('ending_capital'),
+                json.dumps(results.get('portfolio')) if results.get('portfolio') else None,
+                json.dumps(results.get('risk')) if results.get('risk') else None,
+                json.dumps(results.get('equity_curve')) if results.get('equity_curve') else None,
+                json.dumps(results.get('drawdown_curve')) if results.get('drawdown_curve') else None
+            )
+            return "UPDATE 1" in result
+
+    async def get_backtest(self, backtest_id: str, clerk_user_id: str) -> Optional[Dict[str, Any]]:
+        """Get a backtest by ID"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT backtest_id, strategy_id, clerk_user_id, status, error_message,
+                       started_at, completed_at, duration_seconds,
+                       starting_capital, ending_capital,
+                       portfolio, risk, equity_curve, drawdown_curve, created_at
+                FROM backtest_results
+                WHERE backtest_id = $1 AND clerk_user_id = $2
+            """, backtest_id, clerk_user_id)
+            
+            if not row:
+                return None
+            
+            result = dict(row)
+            # Parse JSON fields
+            for field in ['portfolio', 'risk', 'equity_curve', 'drawdown_curve']:
+                if result.get(field) and isinstance(result[field], str):
+                    result[field] = json.loads(result[field])
+            return result
+
+    async def get_strategy_backtests(self, strategy_id: str, clerk_user_id: str) -> List[Dict[str, Any]]:
+        """Get all backtests for a strategy"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT backtest_id, strategy_id, clerk_user_id, status, error_message,
+                       started_at, completed_at, duration_seconds,
+                       starting_capital, ending_capital,
+                       portfolio, risk, equity_curve, drawdown_curve, created_at
+                FROM backtest_results
+                WHERE strategy_id = $1 AND clerk_user_id = $2
+                ORDER BY created_at DESC
+            """, strategy_id, clerk_user_id)
+            
+            results = []
+            for row in rows:
+                result = dict(row)
+                for field in ['portfolio', 'risk', 'equity_curve', 'drawdown_curve']:
+                    if result.get(field) and isinstance(result[field], str):
+                        result[field] = json.loads(result[field])
+                results.append(result)
+            return results
+
+    async def get_latest_backtest(self, strategy_id: str, clerk_user_id: str) -> Optional[Dict[str, Any]]:
+        """Get the most recent completed backtest for a strategy"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT backtest_id, strategy_id, clerk_user_id, status, error_message,
+                       started_at, completed_at, duration_seconds,
+                       starting_capital, ending_capital,
+                       portfolio, risk, equity_curve, drawdown_curve, created_at
+                FROM backtest_results
+                WHERE strategy_id = $1 AND clerk_user_id = $2 AND status = 'completed'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, strategy_id, clerk_user_id)
+            
+            if not row:
+                return None
+            
+            result = dict(row)
+            for field in ['portfolio', 'risk', 'equity_curve', 'drawdown_curve']:
+                if result.get(field) and isinstance(result[field], str):
+                    result[field] = json.loads(result[field])
+            return result
+
+    # ============================================================================
+    # Trades Methods
+    # ============================================================================
+
+    async def add_trades(self, backtest_id: str, trades: List[Dict[str, Any]]) -> int:
+        """Add multiple trades for a backtest"""
+        if not trades:
+            return 0
+        
+        async with self.pool.acquire() as conn:
+            # Use executemany for batch insert
+            await conn.executemany("""
+                INSERT INTO trades (trade_id, backtest_id, symbol, side, quantity, price, timestamp, pnl, pnl_percent)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """, [
+                (str(uuid.uuid4()), backtest_id, t['symbol'], t['side'], 
+                 t['quantity'], t['price'], t['timestamp'], 
+                 t.get('pnl'), t.get('pnl_percent'))
+                for t in trades
+            ])
+        return len(trades)
+
+    async def get_trades(self, backtest_id: str, clerk_user_id: str, 
+                        limit: int = 1000, offset: int = 0) -> List[Dict[str, Any]]:
+        """Get trades for a backtest"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT t.trade_id, t.backtest_id, t.symbol, t.side, t.quantity, 
+                       t.price, t.timestamp, t.pnl, t.pnl_percent
+                FROM trades t
+                JOIN backtest_results b ON t.backtest_id = b.backtest_id
+                WHERE t.backtest_id = $1 AND b.clerk_user_id = $2
+                ORDER BY t.timestamp DESC
+                LIMIT $3 OFFSET $4
+            """, backtest_id, clerk_user_id, limit, offset)
+            
+            return [dict(row) for row in rows]
