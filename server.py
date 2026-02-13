@@ -1285,7 +1285,7 @@ def extract_backtest_results(engine, config: dict) -> dict:
                 'side': side,
                 'quantity': quantity,
                 'price': price,
-                'timestamp': pd.Timestamp(order.ts_init, unit='ns').isoformat() if hasattr(order, 'ts_init') else None,
+                'timestamp': pd.Timestamp(order.ts_init, unit='ns').to_pydatetime() if hasattr(order, 'ts_init') else None,
                 'pnl': None,
                 'pnl_percent': None
             })
