@@ -1246,8 +1246,7 @@ def extract_backtest_results(engine, config: dict) -> dict:
     Extract results from NautilusTrader backtest engine
     """
     # Get portfolio data from engine
-    portfolio = engine.portfolio
-    account = list(engine.portfolio.accounts())[0] if engine.portfolio.accounts() else None
+    account = engine.portfolio.account() if hasattr(engine.portfolio, 'account') else None
     
     starting_capital = float(config['starting_capital'])
     ending_capital = float(account.balance_total().as_decimal()) if account else starting_capital
