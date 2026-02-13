@@ -9,14 +9,14 @@ from nautilus_trader.model.identifiers import Venue
 from uuid import uuid4
 
 # Import all necessary components
-from main import run_backtest, set_global_seed
-from models import RandomForestModel, ModelOutputType
-from adapters import YFinanceAdapter
-from position_sizers import (
+from strategy.main import run_backtest, set_global_seed
+from strategy.models import RandomForestModel, ModelOutputType
+from strategy.adapters import YFinanceAdapter
+from strategy.position_sizers import (
     FixedFractionalSizer, KellyCriterionSizer, 
     RiskParitySizer, EnsembleSizer
 )
-import features
+import strategy.features
 
 # ============================================================================
 # Configuration 1: Simple Random Forest Strategy

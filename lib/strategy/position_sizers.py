@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any
 from decimal import Decimal
 
-from models import SignalOutput, TradingAction, ModelOutputType
+from strategy.models import SignalOutput, TradingAction, ModelOutputType
 from nautilus_trader.model.identifiers import InstrumentId
 
 

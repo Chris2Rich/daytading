@@ -27,10 +27,9 @@ from nautilus_trader.model.currencies import *
 from nautilus_trader.model.objects import *
 from nautilus_trader.model.instruments import *
 
-from models import BaseModel, ModelOutputType, SignalOutput
-from adapters import BaseAdapter
-from position_sizers import BasePositionSizer
-
+from strategy.models import BaseModel, ModelOutputType, SignalOutput
+from strategy.adapters import BaseAdapter
+from strategy.position_sizers import BasePositionSizer
 
 class TradingSystemConfig:
     """
