@@ -8,9 +8,9 @@ import json
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import uuid4, UUID
 from functools import wraps
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 
 import pandas as pd
 import jwt
@@ -54,6 +54,24 @@ jwks_client = PyJWKClient(CLERK_JWKS_URL)
 lm = LM_WRAPPER_WITH_TOOLS(routers["GROQ"]["models"]["llama4scout"])
 titlelm = LM_WRAPPER(routers["GROQ"]["models"]["llama8b"])
 db = Database()
+
+
+def serialize_for_json(obj: Any) -> Any:
+    """
+    Recursively convert non-JSON-serializable objects to JSON-serializable strings.
+    Handles UUID, datetime, Decimal, and other types.
+    """
+    if isinstance(obj, UUID):
+        return str(obj)
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: serialize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [serialize_for_json(item) for item in obj]
+    return obj
 
 
 async def verify_clerk_token(token: str) -> Optional[str]:
@@ -314,17 +332,8 @@ async def handle_get_history(request):
     try:
         history = await db.get_chat_history(chat_id, clerk_user_id)
         
-        # Convert datetime and UUID objects to strings
-        for msg in history:
-            # Convert UUIDs to strings
-            if "message_id" in msg:
-                msg["message_id"] = str(msg["message_id"])
-            if "chat_id" in msg:
-                msg["chat_id"] = str(msg["chat_id"])
-            
-            # Convert datetime to ISO format
-            if "timestamp" in msg:
-                msg["timestamp"] = msg["timestamp"].isoformat()
+        # Serialize all non-JSON-serializable objects
+        history = [serialize_for_json(msg) for msg in history]
         
         return web.json_response({
             "chatid": chat_id,
@@ -361,16 +370,8 @@ async def handle_get_chats(request):
     try:
         chats = await db.get_user_chats(clerk_user_id)
         
-        # Convert datetime and UUID objects to strings
-        for chat in chats:
-            # Convert UUID to string
-            if "chat_id" in chat:
-                chat["chat_id"] = str(chat["chat_id"])
-            
-            # Convert datetime objects to ISO format strings
-            for key in ["created_at", "updated_at"]:
-                if key in chat and chat[key]:
-                    chat[key] = chat[key].isoformat()
+        # Serialize all non-JSON-serializable objects
+        chats = [serialize_for_json(chat) for chat in chats]
         
         return web.json_response({
             "chats": chats
@@ -733,12 +734,8 @@ async def handle_list_strategies(request):
     try:
         strategies = await db.get_user_strategies(clerk_user_id)
         
-        # Convert datetime objects to ISO format strings
-        for strategy in strategies:
-            if strategy.get('created_at'):
-                strategy['created_at'] = strategy['created_at'].isoformat()
-            if strategy.get('updated_at'):
-                strategy['updated_at'] = strategy['updated_at'].isoformat()
+        # Serialize all non-JSON-serializable objects
+        strategies = [serialize_for_json(s) for s in strategies]
         
         return web.json_response({"strategies": strategies})
     
@@ -837,30 +834,13 @@ async def handle_get_strategy(request):
                 status=404
             )
         
-        # Convert UUID objects to strings
-        if strategy.get('strategy_id'):
-            strategy['strategy_id'] = str(strategy['strategy_id'])
-        if strategy.get('clerk_user_id'):
-            strategy['clerk_user_id'] = str(strategy['clerk_user_id'])
-        
-        # Convert datetime objects
-        if strategy.get('created_at'):
-            strategy['created_at'] = strategy['created_at'].isoformat()
-        if strategy.get('updated_at'):
-            strategy['updated_at'] = strategy['updated_at'].isoformat()
-        
         # Include latest backtest results if available
         latest_backtest = await db.get_latest_backtest(strategy_id, clerk_user_id)
         if latest_backtest:
-            # Convert UUID and datetime objects
-            if latest_backtest.get('backtest_id'):
-                latest_backtest['backtest_id'] = str(latest_backtest['backtest_id'])
-            if latest_backtest.get('strategy_id'):
-                latest_backtest['strategy_id'] = str(latest_backtest['strategy_id'])
-            for key in ['started_at', 'completed_at', 'created_at']:
-                if latest_backtest.get(key):
-                    latest_backtest[key] = latest_backtest[key].isoformat()
-            strategy['backtest_results'] = latest_backtest
+            strategy['backtest_results'] = serialize_for_json(latest_backtest)
+        
+        # Serialize all non-JSON-serializable objects
+        strategy = serialize_for_json(strategy)
         
         return web.json_response(strategy)
     
@@ -1058,10 +1038,8 @@ async def handle_get_backtest_status(request):
                 status=404
             )
         
-        # Convert datetime objects
-        for key in ['started_at', 'completed_at', 'created_at']:
-            if backtest.get(key):
-                backtest[key] = backtest[key].isoformat()
+        # Serialize all non-JSON-serializable objects
+        backtest = serialize_for_json(backtest)
         
         return web.json_response(backtest)
     
@@ -1098,21 +1076,14 @@ async def handle_get_backtest_results(request):
                 status=404
             )
         
-        # Convert datetime objects
-        for key in ['started_at', 'completed_at', 'created_at']:
-            if backtest.get(key):
-                backtest[key] = backtest[key].isoformat()
-        
         # Get trades if backtest is completed
         trades = []
         if backtest.get('status') == 'completed':
             trades = await db.get_trades(backtest_id, clerk_user_id, limit=1000)
-            # Convert timestamp for trades
-            for trade in trades:
-                if trade.get('timestamp'):
-                    trade['timestamp'] = trade['timestamp'].isoformat()
         
-        backtest['trades'] = trades
+        # Serialize all non-JSON-serializable objects
+        backtest = serialize_for_json(backtest)
+        backtest['trades'] = serialize_for_json(trades)
         
         return web.json_response(backtest)
     
