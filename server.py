@@ -1259,34 +1259,36 @@ def extract_backtest_results(engine, config: dict) -> dict:
     trades = []
     equity_curve = []
     
-    # Get fills (executions) from cache
-    fills = list(engine.cache.fills())
+    # Get orders from cache - use orders() instead of fills()
+    orders = list(engine.cache.orders()) if hasattr(engine.cache, 'orders') else []
     
     position_map = {}  # symbol -> current position
     
-    for fill in fills:
-        symbol = fill.instrument_id.symbol.value
-        side = 'buy' if fill.order_side == 1 else 'sell'
-        quantity = float(fill.quantity)
-        price = float(fill.price)
-        
-        # Track position
-        if symbol not in position_map:
-            position_map[symbol] = 0
-        qty_change = quantity if side == 'buy' else -quantity
-        position_map[symbol] += qty_change
-        
-        trades.append({
-            'trade_id': str(fill.id),
-            'backtest_id': '',  # Will be set by caller
-            'symbol': symbol,
-            'side': side,
-            'quantity': quantity,
-            'price': price,
-            'timestamp': pd.Timestamp(fill.ts_event, unit='ns').isoformat(),
-            'pnl': float(fill.realized_pnl) if hasattr(fill, 'realized_pnl') else None,
-            'pnl_percent': None  # Calculate if needed
-        })
+    for order in orders:
+        # Only process filled orders
+        if hasattr(order, 'filled_qty') and order.filled_qty > 0:
+            symbol = order.instrument_id.symbol.value
+            side = 'buy' if order.side.value == 'BUY' else 'sell'
+            quantity = float(order.filled_qty)
+            price = float(order.avg_px) if hasattr(order, 'avg_px') and order.avg_px else 0
+            
+            # Track position
+            if symbol not in position_map:
+                position_map[symbol] = 0
+            qty_change = quantity if side == 'buy' else -quantity
+            position_map[symbol] += qty_change
+            
+            trades.append({
+                'trade_id': str(order.client_order_id),
+                'backtest_id': '',  # Will be set by caller
+                'symbol': symbol,
+                'side': side,
+                'quantity': quantity,
+                'price': price,
+                'timestamp': pd.Timestamp(order.ts_init, unit='ns').isoformat() if hasattr(order, 'ts_init') else None,
+                'pnl': None,
+                'pnl_percent': None
+            })
     
     # Build equity curve from portfolio snapshots if available
     # For now, create a simple curve based on start/end
