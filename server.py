@@ -5,13 +5,20 @@ import sys
 import os
 import traceback
 import json
-from aiohttp import web
+import time
+from datetime import datetime, timedelta
+from decimal import Decimal
+from uuid import uuid4
 from functools import wraps
 from typing import Optional, List, Dict, Any
-from clerk_backend_api import Clerk
+
+import pandas as pd
 import jwt
 from jwt import PyJWKClient
+from aiohttp import web
+from clerk_backend_api import Clerk
 
+# Setup path for local imports
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 
 from llm.lmwrapper import LM_WRAPPER, LM_WRAPPER_WITH_TOOLS, routers
@@ -24,10 +31,12 @@ from retrieval.yahoofinance import (
     get_price_targets,
     get_key_metrics_timeseries
 )
-
+from retrieval.snaptrade import get_portfolio_data, remove_broker_authorization
 from strategy.main import run_backtest
 from strategy.adapters import YFinanceAdapter
-from retrieval.snaptrade import get_portfolio_data, remove_broker_authorization
+from strategy.models import RandomForestModel, ModelOutputType
+from strategy.features import rsi_feature, moving_average_feature
+from strategy.position_sizers import FixedFractionalSizer
 
 # Clerk configuration
 CLERK_SECRET_KEY = os.environ.get("CLERK_SECRET_KEY")
@@ -1110,14 +1119,6 @@ async def run_backtest_task(backtest_id: str, strategy_id: str, clerk_user_id: s
     """
     Background task to run backtest using NautilusTrader
     """
-    import time
-    from datetime import datetime
-    
-    # Import strategy system
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'lib'))
-    from strategy.main import TradingSystemConfig, run_backtest, MLTradingStrategy
-    from strategy.models import RandomForestModel, ModelOutputType
-    
     try:
         # Update status to running
         await db.update_backtest_status(backtest_id, clerk_user_id, 'running')
@@ -1172,10 +1173,6 @@ def prepare_trading_config(config: dict) -> dict:
     """
     Convert frontend config to TradingSystemConfig format
     """
-    from uuid import uuid4
-    from decimal import Decimal
-    from datetime import datetime
-    
     # Default configuration
     default_config = {
         'seed': 42,
@@ -1207,14 +1204,7 @@ def prepare_trading_config(config: dict) -> dict:
     trading_config['data_adapters'] = adapters
     
     # Setup model configuration
-    model_type = config.get('model_type', 'RandomForest')
-    if model_type == 'RandomForest':
-        from strategy.models import RandomForestModel
-        trading_config['model_type'] = RandomForestModel
-    else:
-        from strategy.models import RandomForestModel
-        trading_config['model_type'] = RandomForestModel
-    
+    trading_config['model_type'] = RandomForestModel
     trading_config['model_output_type'] = ModelOutputType.ACTION
     trading_config['model_params'] = config.get('model_params', {
         'n_estimators': 100,
@@ -1225,7 +1215,6 @@ def prepare_trading_config(config: dict) -> dict:
     # Setup features
     # For now, use a simple default feature set
     # In the future, this should be configurable
-    from strategy.features import rsi_feature, moving_average_feature
     features = []
     if config.get('features'):
         # Parse features from config
@@ -1244,14 +1233,7 @@ def prepare_trading_config(config: dict) -> dict:
     trading_config['features'] = features
     
     # Setup position sizer
-    position_sizer_type = config.get('position_sizer_type', 'FixedFractional')
-    if position_sizer_type == 'FixedFractional':
-        from strategy.position_sizers import FixedFractionalSizer
-        trading_config['position_sizer_type'] = FixedFractionalSizer
-    else:
-        from strategy.position_sizers import FixedFractionalSizer
-        trading_config['position_sizer_type'] = FixedFractionalSizer
-    
+    trading_config['position_sizer_type'] = FixedFractionalSizer
     trading_config['position_sizer_params'] = config.get('position_sizer_params', {
         'fraction': 0.1
     })
@@ -1326,7 +1308,6 @@ def extract_backtest_results(engine, config: dict) -> dict:
     
     # Build equity curve from portfolio snapshots if available
     # For now, create a simple curve based on start/end
-    from datetime import timedelta
     days = (config['backtest_end'] - config['backtest_start']).days
     current_equity = starting_capital
     
