@@ -837,6 +837,12 @@ async def handle_get_strategy(request):
                 status=404
             )
         
+        # Convert UUID objects to strings
+        if strategy.get('strategy_id'):
+            strategy['strategy_id'] = str(strategy['strategy_id'])
+        if strategy.get('clerk_user_id'):
+            strategy['clerk_user_id'] = str(strategy['clerk_user_id'])
+        
         # Convert datetime objects
         if strategy.get('created_at'):
             strategy['created_at'] = strategy['created_at'].isoformat()
@@ -846,7 +852,11 @@ async def handle_get_strategy(request):
         # Include latest backtest results if available
         latest_backtest = await db.get_latest_backtest(strategy_id, clerk_user_id)
         if latest_backtest:
-            # Convert datetime objects
+            # Convert UUID and datetime objects
+            if latest_backtest.get('backtest_id'):
+                latest_backtest['backtest_id'] = str(latest_backtest['backtest_id'])
+            if latest_backtest.get('strategy_id'):
+                latest_backtest['strategy_id'] = str(latest_backtest['strategy_id'])
             for key in ['started_at', 'completed_at', 'created_at']:
                 if latest_backtest.get(key):
                     latest_backtest[key] = latest_backtest[key].isoformat()
