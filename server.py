@@ -26,7 +26,7 @@ from retrieval.yahoofinance import (
 )
 
 from strategy.main import run_backtest
-from strategy.adapters import YahooFinanceAdapter
+from strategy.adapters import YFinanceAdapter
 from retrieval.snaptrade import get_portfolio_data, remove_broker_authorization
 
 # Clerk configuration
@@ -1116,7 +1116,6 @@ async def run_backtest_task(backtest_id: str, strategy_id: str, clerk_user_id: s
     # Import strategy system
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'lib'))
     from strategy.main import TradingSystemConfig, run_backtest, MLTradingStrategy
-    from strategy.adapters import YFinanceAdapter
     from strategy.models import RandomForestModel, ModelOutputType
     
     try:
@@ -1199,7 +1198,6 @@ def prepare_trading_config(config: dict) -> dict:
     }
     
     # Setup data adapters for each symbol
-    from strategy.adapters import YFinanceAdapter
     interval = config.get('timeframe', '1d')
     adapters = {}
     for symbol in trading_config['traded_symbols']:
