@@ -1364,6 +1364,22 @@ def extract_backtest_results(engine, config: dict) -> dict:
 # News Endpoints
 # ============================================================================
 
+def transform_article_for_api(article: dict) -> dict:
+    """
+    Transform article from database format to API format.
+    Converts source_name to source: {name} for frontend compatibility.
+    """
+    # Create a copy to avoid modifying the original
+    transformed = dict(article)
+    
+    # Transform source_name to source: {name}
+    if "source_name" in transformed and transformed["source_name"]:
+        transformed["source"] = {"name": transformed["source_name"]}
+        del transformed["source_name"]
+    
+    return transformed
+
+
 @require_auth
 async def handle_get_news(request):
     """
@@ -1392,6 +1408,9 @@ async def handle_get_news(request):
         
         # Fetch news using the global news_fetcher
         articles = await news_fetcher.get_news(internal_category, max_results)
+        
+        # Transform articles from database format to API format
+        articles = [transform_article_for_api(a) for a in articles]
         
         # Serialize articles for JSON (handle UUID, datetime, etc.)
         articles = [serialize_for_json(a) for a in articles]
@@ -1422,6 +1441,9 @@ async def handle_get_latest_news(request):
         
         # Fetch news using the global news_fetcher
         articles = await news_fetcher.get_latest_headlines(max_results)
+        
+        # Transform articles from database format to API format
+        articles = [transform_article_for_api(a) for a in articles]
         
         # Serialize articles for JSON (handle UUID, datetime, etc.)
         articles = [serialize_for_json(a) for a in articles]
