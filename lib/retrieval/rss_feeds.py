@@ -502,7 +502,9 @@ def article_to_dict(article: ParsedArticle) -> Dict[str, Any]:
         "description": article.description,
         "url": article.url,
         "url_to_image": article.url_to_image,
-        "source_name": article.source_name,
+        "source": {
+            "name": article.source_name
+        },
         "source_url": article.source_url,
         "category": article.category,
         "published_at": article.published_at
