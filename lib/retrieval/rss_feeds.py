@@ -13,13 +13,7 @@ import re
 
 # RSS Feed sources
 RSS_FEEDS = {
-    # CNBC feeds
-    "cnbc_top": {
-        "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-        "category": "general",
-        "source_name": "CNBC",
-    },
-    # Bloomberg feeds
+    # Bloomberg feeds - returns .rss file with Content-Disposition: attachment
     "bloomberg_markets": {
         "url": "https://feeds.bloomberg.com/markets/news.rss",
         "category": "general",
@@ -29,6 +23,30 @@ RSS_FEEDS = {
         "url": "https://feeds.bloomberg.com/technology/news.rss",
         "category": "technology",
         "source_name": "Bloomberg",
+    },
+    # CNBC feeds
+    "cnbc_top": {
+        "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+        "category": "general",
+        "source_name": "CNBC",
+    },
+    # Yahoo Finance
+    "yahoo_finance": {
+        "url": "https://finance.yahoo.com/news/rssindex",
+        "category": "general",
+        "source_name": "Yahoo Finance",
+    },
+    # MarketWatch
+    "marketwatch_top": {
+        "url": "https://feeds.marketwatch.com/marketwatch/topstories",
+        "category": "general",
+        "source_name": "MarketWatch",
+    },
+    # Wall Street Journal - returns .xml file
+    "wsj_markets": {
+        "url": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+        "category": "general",
+        "source_name": "Wall Street Journal",
     },
     # Guardian feeds
     "guardian_business": {
@@ -62,17 +80,6 @@ RSS_FEEDS = {
         "category": "politics",
         "source_name": "New York Times",
     },
-    # Reuters
-    "reuters_business": {
-        "url": "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
-        "category": "general",
-        "source_name": "Reuters",
-    },
-    "reuters_technology": {
-        "url": "https://www.reutersagency.com/feed/?best-tech&post_type=best",
-        "category": "technology",
-        "source_name": "Reuters",
-    },
 }
 
 
@@ -88,10 +95,18 @@ class ParsedArticle:
     published_at: datetime
 
 
+# HTTP headers to mimic a browser request (helps avoid 403 from some feeds)
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/rss+xml, application/xml, text/xml, application/atom+xml, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 async def fetch_feed(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     """Fetch RSS feed content."""
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+        async with session.get(url, headers=HTTP_HEADERS, timeout=aiohttp.ClientTimeout(total=30)) as response:
             if response.status == 200:
                 return await response.text()
             else:

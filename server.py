@@ -1393,6 +1393,9 @@ async def handle_get_news(request):
         # Fetch news using the global news_fetcher
         articles = await news_fetcher.get_news(internal_category, max_results)
         
+        # Serialize articles for JSON (handle UUID, datetime, etc.)
+        articles = [serialize_for_json(a) for a in articles]
+        
         return web.json_response({
             "category": category,
             "articles": articles,
@@ -1419,6 +1422,9 @@ async def handle_get_latest_news(request):
         
         # Fetch news using the global news_fetcher
         articles = await news_fetcher.get_latest_headlines(max_results)
+        
+        # Serialize articles for JSON (handle UUID, datetime, etc.)
+        articles = [serialize_for_json(a) for a in articles]
         
         return web.json_response({
             "articles": articles,
