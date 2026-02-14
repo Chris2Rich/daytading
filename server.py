@@ -1368,6 +1368,8 @@ def transform_article_for_api(article: dict) -> dict:
     """
     Transform article from database format to API format.
     Converts source_name to source: {name} for frontend compatibility.
+    Also converts url_to_image to urlToImage.
+    Converts category string to array.
     """
     # Create a copy to avoid modifying the original
     transformed = dict(article)
@@ -1376,6 +1378,17 @@ def transform_article_for_api(article: dict) -> dict:
     if "source_name" in transformed and transformed["source_name"]:
         transformed["source"] = {"name": transformed["source_name"]}
         del transformed["source_name"]
+    
+    # Transform url_to_image to urlToImage
+    if "url_to_image" in transformed:
+        transformed["urlToImage"] = transformed["url_to_image"]
+        del transformed["url_to_image"]
+    
+    # Transform category string to array
+    if "category" in transformed and transformed["category"]:
+        cat = transformed["category"]
+        if isinstance(cat, str):
+            transformed["category"] = [cat]
     
     return transformed
 

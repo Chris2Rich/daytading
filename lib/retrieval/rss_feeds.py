@@ -497,6 +497,9 @@ async def fetch_feed_for_category(category: str) -> List[Dict[str, Any]]:
 
 def article_to_dict(article: ParsedArticle) -> Dict[str, Any]:
     """Convert ParsedArticle to dictionary for database storage."""
+    # Store date as ISO format string for proper JSON serialization
+    published_at_str = article.published_at.isoformat() if isinstance(article.published_at, datetime) else str(article.published_at)
+    
     return {
         "title": article.title,
         "description": article.description,
@@ -505,7 +508,7 @@ def article_to_dict(article: ParsedArticle) -> Dict[str, Any]:
         "source_name": article.source_name,
         "source_url": article.source_url,
         "category": article.category,
-        "published_at": article.published_at
+        "published_at": published_at_str
     }
 
 
