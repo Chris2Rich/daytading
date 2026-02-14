@@ -161,6 +161,32 @@ class Database:
                 ON trades(backtest_id, timestamp DESC)
             """)
 
+            # News articles cache table (RSS feeds)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS news_articles (
+                    id UUID PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    url TEXT NOT NULL UNIQUE,
+                    url_to_image TEXT,
+                    source_name TEXT NOT NULL,
+                    source_url TEXT,
+                    category TEXT NOT NULL,
+                    published_at TIMESTAMPTZ NOT NULL,
+                    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_news_articles_category 
+                ON news_articles(category, published_at DESC)
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_news_articles_fetched 
+                ON news_articles(fetched_at DESC)
+            """)
+
     async def ensure_user(self, clerk_user_id: str):
         """Create user if doesn't exist"""
         async with self.pool.acquire() as conn:
@@ -254,6 +280,130 @@ class Database:
             """, chat_id)
 
             return [dict(row) for row in rows]
+
+    # ============================================================================
+    # News Articles Methods
+    # ============================================================================
+
+    async def get_news_articles(
+        self, 
+        category: Optional[str] = None, 
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Get cached news articles, optionally filtered by category.
+        """
+        async with self.pool.acquire() as conn:
+            if category:
+                rows = await conn.fetch("""
+                    SELECT id, title, description, url, url_to_image, source_name, 
+                           source_url, category, published_at, fetched_at
+                    FROM news_articles
+                    WHERE category = $1
+                    ORDER BY published_at DESC
+                    LIMIT $2
+                """, category, limit)
+            else:
+                rows = await conn.fetch("""
+                    SELECT id, title, description, url, url_to_image, source_name, 
+                           source_url, category, published_at, fetched_at
+                    FROM news_articles
+                    ORDER BY published_at DESC
+                    LIMIT $1
+                """, limit)
+            
+            return [dict(row) for row in rows]
+
+    async def upsert_news_article(
+        self,
+        title: str,
+        description: Optional[str],
+        url: str,
+        url_to_image: Optional[str],
+        source_name: str,
+        source_url: Optional[str],
+        category: str,
+        published_at: datetime
+    ) -> None:
+        """
+        Insert or update a news article. Uses URL as unique constraint.
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO news_articles (
+                    id, title, description, url, url_to_image, source_name, 
+                    source_url, category, published_at, fetched_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                ON CONFLICT (url) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    url_to_image = EXCLUDED.url_to_image,
+                    fetched_at = NOW()
+            """, str(uuid.uuid4()), title, description, url, url_to_image, 
+                source_name, source_url, category, published_at)
+
+    async def bulk_insert_news_articles(
+        self, 
+        articles: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Bulk insert news articles. Uses ON CONFLICT to handle duplicates.
+        Returns the number of articles processed.
+        """
+        if not articles:
+            return 0
+        
+        async with self.pool.acquire() as conn:
+            for article in articles:
+                await conn.execute("""
+                    INSERT INTO news_articles (
+                        id, title, description, url, url_to_image, source_name, 
+                        source_url, category, published_at, fetched_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                    ON CONFLICT (url) DO UPDATE SET
+                        title = EXCLUDED.title,
+                        description = EXCLUDED.description,
+                        url_to_image = EXCLUDED.url_to_image,
+                        fetched_at = NOW()
+                """, str(uuid.uuid4()), article.get('title'), article.get('description'),
+                    article.get('url'), article.get('url_to_image'), article.get('source_name'),
+                    article.get('source_url'), article.get('category'), article.get('published_at'))
+        
+        return len(articles)
+
+    async def cleanup_old_news_articles(self, days: int = 30) -> int:
+        """
+        Delete news articles older than specified days.
+        Returns the number of articles deleted.
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.execute("""
+                DELETE FROM news_articles
+                WHERE fetched_at < NOW() - INTERVAL '1 day' * $1
+            """, days)
+            # Result is like "DELETE 10"
+            if "DELETE" in result:
+                return int(result.split()[-1])
+            return 0
+
+    async def get_news_cache_age(self) -> Optional[float]:
+        """
+        Get the age of the news cache in seconds.
+        Returns None if no articles exist.
+        """
+        async with self.pool.acquire() as conn:
+            last_fetched = await conn.fetchval("""
+                SELECT MAX(fetched_at) FROM news_articles
+            """)
+            
+            if not last_fetched:
+                return None
+            
+            now = datetime.now(timezone.utc)
+            age = now - last_fetched
+            return age.total_seconds()
 
     async def get_user_chats(self, clerk_user_id: str) -> List[Dict[str, Any]]:
         """List all chats for a user"""

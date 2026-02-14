@@ -37,6 +37,7 @@ from strategy.adapters import YFinanceAdapter
 from strategy.models import RandomForestModel, ModelOutputType
 from strategy.features import rsi_feature, moving_average_feature
 from strategy.position_sizers import FixedFractionalSizer
+from retrieval.rss_feeds import get_news_fetcher
 
 # Clerk configuration
 CLERK_SECRET_KEY = os.environ.get("CLERK_SECRET_KEY")
@@ -54,6 +55,10 @@ jwks_client = PyJWKClient(CLERK_JWKS_URL)
 lm = LM_WRAPPER_WITH_TOOLS(routers["GROQ"]["models"]["llama4scout"])
 titlelm = LM_WRAPPER(routers["GROQ"]["models"]["llama8b"])
 db = Database()
+
+# Initialize news fetcher with database for caching
+from retrieval.rss_feeds import get_news_fetcher
+news_fetcher = None
 
 
 def serialize_for_json(obj: Any) -> Any:
@@ -1355,6 +1360,80 @@ def extract_backtest_results(engine, config: dict) -> dict:
         'trades': trades
     }
 
+# ============================================================================
+# News Endpoints
+# ============================================================================
+
+@require_auth
+async def handle_get_news(request):
+    """
+    GET /news
+    Get financial news articles
+    
+    Query parameters:
+    - category: News category (general, technology, retail, life_sciences, politics, developing_markets)
+    - max_results: Maximum number of articles (default: 10)
+    """
+    try:
+        category = request.query.get("category", "general")
+        max_results = int(request.query.get("max_results", "10"))
+        
+        # Map URL-friendly category names to internal names
+        category_map = {
+            "general": "general",
+            "technology": "technology",
+            "retail": "retail",
+            "life_sciences": "life sciences",
+            "politics": "politics",
+            "developing_markets": "developing markets"
+        }
+        
+        internal_category = category_map.get(category, "general")
+        
+        # Fetch news using the global news_fetcher
+        articles = await news_fetcher.get_news(internal_category, max_results)
+        
+        return web.json_response({
+            "category": category,
+            "articles": articles,
+            "count": len(articles)
+        })
+    
+    except Exception as e:
+        print(f"Error in handle_get_news: {e}")
+        traceback.print_exc()
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
+
+
+@require_auth
+async def handle_get_latest_news(request):
+    """
+    GET /news/latest
+    Get latest financial headlines across all categories
+    """
+    try:
+        max_results = int(request.query.get("max_results", "20"))
+        
+        # Fetch news using the global news_fetcher
+        articles = await news_fetcher.get_latest_headlines(max_results)
+        
+        return web.json_response({
+            "articles": articles,
+            "count": len(articles)
+        })
+    
+    except Exception as e:
+        print(f"Error in handle_get_latest_news: {e}")
+        traceback.print_exc()
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
+
+
 async def handle_health(request):
     """Health check endpoint"""
     return web.json_response({"status": "ok"})
@@ -1364,6 +1443,11 @@ async def on_startup(app):
     """Initialize database on startup"""
     await db.initialize()
     print("Database initialized")
+    
+    # Initialize news fetcher with database for caching
+    global news_fetcher
+    news_fetcher = get_news_fetcher(db)
+    print("News fetcher initialized")
 
 
 async def on_cleanup(app):
@@ -1420,6 +1504,10 @@ def create_app():
     app.router.add_post("/strategies/{strategy_id}/backtest", handle_run_backtest)
     app.router.add_get("/backtest/{backtest_id}/status", handle_get_backtest_status)
     app.router.add_get("/backtest/{backtest_id}/results", handle_get_backtest_results)
+
+    # News routes
+    app.router.add_get("/news", handle_get_news)
+    app.router.add_get("/news/latest", handle_get_latest_news)
 
     app.router.add_get("/health", handle_health)
     
