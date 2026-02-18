@@ -216,9 +216,8 @@ async def handle_generate(request):
             f"data: {json.dumps({'type': 'metadata', 'chatid': chat_id, 'message_id': user_message_id})}\n\n".encode()
         )
         
-        # Stream LLM response with search support
+        # Stream LLM response with agentic loop
         assistant_response = ""
-        pending_thoughts = []
         pending_tool_calls = []
         try:
             async for token_data in lm.stream_agentic(
@@ -229,18 +228,7 @@ async def handle_generate(request):
                 clerk_user_id=clerk_user_id,
                 db=db,
             ):
-                if token_data["type"] == "thinking":
-                    await response.write(
-                        f"data: {json.dumps({'type': 'thinking', 'content': token_data.get('content', '')})}\n\n".encode()
-                    )
-                    pending_thoughts.append(token_data.get("content", ""))
-                    
-                elif token_data["type"] == "thinking_chunk":
-                    await response.write(
-                        f"data: {json.dumps({'type': 'thinking_chunk', 'content': token_data.get('content', '')})}\n\n".encode()
-                    )
-                    
-                elif token_data["type"] == "tool_call":
+                if token_data["type"] == "tool_call":
                     tool_event = {
                         "type": "tool_call",
                         "tool": token_data.get("tool", ""),
@@ -271,11 +259,6 @@ async def handle_generate(request):
                     assistant_response += token
                     await response.write(
                         f"data: {json.dumps({'type': 'token', 'content': token})}\n\n".encode()
-                    )
-                
-                elif token_data["type"] == "thoughts_complete":
-                    await response.write(
-                        f"data: {json.dumps({'type': 'thoughts_complete', 'thoughts': token_data.get('thoughts', [])})}\n\n".encode()
                     )
                 
                 elif token_data["type"] == "tool_log":
@@ -1404,6 +1387,10 @@ def transform_article_for_api(article: dict) -> dict:
     if "url_to_image" in transformed:
         transformed["urlToImage"] = transformed["url_to_image"]
         del transformed["url_to_image"]
+    
+    if "published_at" in transformed:
+        transformed["publishedAt"] = transformed["published_at"]
+        del transformed["published_at"]
     
     if "category" in transformed and transformed["category"]:
         cat = transformed["category"]

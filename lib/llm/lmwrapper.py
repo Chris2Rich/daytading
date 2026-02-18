@@ -701,15 +701,11 @@ MATH FORMATTING:
         
         messages.append({"role": "user", "content": user_message})
         
-        all_thoughts = []
         all_tool_calls = []
         
         for iteration in range(max_iterations):
-            thinking_content = ""
             response_content = ""
             tool_calls_made = []
-            in_thinking = False
-            thinking_buffer = ""
             
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
@@ -770,28 +766,7 @@ MATH FORMATTING:
                                         if "content" in delta and delta["content"]:
                                             content = delta["content"]
                                             response_content += content
-                                            
-                                            if ":::thinking" in content or in_thinking:
-                                                if ":::thinking" in content:
-                                                    in_thinking = True
-                                                    thinking_buffer = ""
-                                                    content = content.replace(":::thinking", "")
-                                                
-                                                if ":::" in content and thinking_buffer:
-                                                    in_thinking = False
-                                                    parts = content.split(":::", 1)
-                                                    thinking_buffer += parts[0]
-                                                    all_thoughts.append(thinking_buffer)
-                                                    yield {"type": "thinking", "content": thinking_buffer}
-                                                    content = parts[1] if len(parts) > 1 else ""
-                                                    thinking_buffer = ""
-                                                elif in_thinking:
-                                                    thinking_buffer += content
-                                                    yield {"type": "thinking_chunk", "content": content}
-                                                else:
-                                                    yield {"type": "token", "content": content}
-                                            else:
-                                                yield {"type": "token", "content": content}
+                                            yield {"type": "token", "content": content}
                                 
                                 except json.JSONDecodeError:
                                     continue
@@ -832,7 +807,6 @@ MATH FORMATTING:
             
             break
         
-        yield {"type": "thoughts_complete", "thoughts": all_thoughts}
         yield {"type": "tool_log", "calls": all_tool_calls}
         yield {"type": "done"}
 
