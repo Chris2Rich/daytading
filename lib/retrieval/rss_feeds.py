@@ -11,6 +11,11 @@ from dataclasses import dataclass
 import xml.etree.ElementTree as ET
 import re
 
+# Image fetcher configuration
+IMAGE_FETCH_CONCURRENCY = 20
+IMAGE_FETCH_TIMEOUT = 20  # seconds
+PLACEHOLDER_IMAGE_URL = "https://placehold.co/341x192?text=NEWS"
+
 # RSS Feed sources
 RSS_FEEDS = {
     # Bloomberg feeds - returns .rss file with Content-Disposition: attachment
@@ -79,6 +84,146 @@ RSS_FEEDS = {
         "url": "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
         "category": "politics",
         "source_name": "New York Times",
+    },
+    "investing_com": {
+        "url": "https://www.investing.com/rss/news.rss",
+        "category": "general",
+        "source_name": "Investing.com",
+    },
+    "seeking_alpha": {
+        "url": "https://seekingalpha.com/market_currents.xml",
+        "category": "general",
+        "source_name": "Seeking Alpha",
+    },
+    "washington_post_business": {
+        "url": "https://feeds.washingtonpost.com/rss/business",
+        "category": "general",
+        "source_name": "Washington Post",
+    },
+    "business_insider": {
+        "url": "http://feeds2.feedburner.com/businessinsider",
+        "category": "general",
+        "source_name": "Business Insider",
+    },
+    "financial_times": {
+        "url": "https://www.ft.com/?format=rss",
+        "category": "general",
+        "source_name": "Financial Times",
+    },
+    "fortune": {
+        "url": "http://fortune.com/feed/",
+        "category": "general",
+        "source_name": "Fortune",
+    },
+    "economic_times_india": {
+        "url": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+        "category": "general",
+        "source_name": "Economic Times",
+    },
+    "financial_post_canada": {
+        "url": "http://business.financialpost.com/feed",
+        "category": "general",
+        "source_name": "Financial Post",
+    },
+    "sfgate_business": {
+        "url": "https://www.sfgate.com/rss/feed/Business-and-Technology-News-448.php",
+        "category": "general",
+        "source_name": "SFGate",
+    },
+    "entrepreneur": {
+        "url": "https://www.entrepreneur.com/latest.rss",
+        "category": "general",
+        "source_name": "Entrepreneur",
+    },
+    "moneyweb_sa": {
+        "url": "https://www.moneyweb.co.za/feed",
+        "category": "general",
+        "source_name": "MoneyWeb",
+    },
+    "express_personal_finance": {
+        "url": "http://feeds.feedburner.com/daily-express-personal-finance-news",
+        "category": "general",
+        "source_name": "Daily Express",
+    },
+    "nikkei_asia": {
+        "url": "https://asia.nikkei.com/rss/feed/nar",
+        "category": "general",
+        "source_name": "Nikkei Asia",
+    },
+    "economist_economics": {
+        "url": "http://www.economist.com/sections/economics/rss.xml",
+        "category": "general",
+        "source_name": "The Economist",
+    },
+    "fast_company": {
+        "url": "https://feeds.feedburner.com/fastcompany/headlines",
+        "category": "general",
+        "source_name": "Fast Company",
+    },
+    "coindesk": {
+        "url": "https://feeds.feedburner.com/CoinDesk",
+        "category": "crypto",
+        "source_name": "CoinDesk",
+    },
+    "bitcoin_com": {
+        "url": "https://news.bitcoin.com/feed/",
+        "category": "crypto",
+        "source_name": "Bitcoin.com",
+    },
+    "cointelegraph": {
+        "url": "https://cointelegraph.com/feed",
+        "category": "crypto",
+        "source_name": "Cointelegraph",
+    },
+    "bitcoin_magazine": {
+        "url": "https://bitcoinmagazine.com/feed",
+        "category": "crypto",
+        "source_name": "Bitcoin Magazine",
+    },
+    "cryptoslate": {
+        "url": "https://cryptoslate.com/feed/",
+        "category": "crypto",
+        "source_name": "CryptoSlate",
+    },
+    "newsbtc": {
+        "url": "http://www.newsbtc.com/feed/",
+        "category": "crypto",
+        "source_name": "NewsBTC",
+    },
+    "coinspeaker": {
+        "url": "https://www.coinspeaker.com/feed/",
+        "category": "crypto",
+        "source_name": "Coinspeaker",
+    },
+    "99bitcoins": {
+        "url": "https://99bitcoins.com/feed/",
+        "category": "crypto",
+        "source_name": "99Bitcoins",
+    },
+    "the_merkle": {
+        "url": "https://themerkle.com/feed/",
+        "category": "crypto",
+        "source_name": "The Merkle",
+    },
+    "coincentral": {
+        "url": "https://coincentral.com/feed/",
+        "category": "crypto",
+        "source_name": "CoinCentral",
+    },
+    "live_bitcoin_news": {
+        "url": "http://www.livebitcoinnews.com/feed",
+        "category": "crypto",
+        "source_name": "Live Bitcoin News",
+    },
+    "bankless_times": {
+        "url": "https://www.banklesstimes.com/feed/",
+        "category": "crypto",
+        "source_name": "BanklessTimes",
+    },
+    "forex_news_now": {
+        "url": "http://www.binaryoptionsnow.com/feed/",
+        "category": "forex",
+        "source_name": "Forex News Now",
     },
 }
 
@@ -171,6 +316,118 @@ def extract_image_from_content(content: str) -> Optional[str]:
         return og_match.group(1)
     
     return None
+
+
+async def fetch_article_thumbnail(
+    session: aiohttp.ClientSession,
+    article_url: str,
+    semaphore: asyncio.Semaphore
+) -> Optional[str]:
+    """
+    Fetch article page and extract og:image or twitter:image.
+    
+    Returns image URL or None if not found.
+    """
+    async with semaphore:
+        try:
+            async with session.get(
+                article_url,
+                headers=HTTP_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=IMAGE_FETCH_TIMEOUT),
+                allow_redirects=True
+            ) as response:
+                if response.status != 200:
+                    return None
+                    
+                html = await response.text()
+                
+                og_match = re.search(
+                    r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+                    html, re.IGNORECASE
+                )
+                if og_match:
+                    return og_match.group(1)
+                
+                og_match2 = re.search(
+                    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+                    html, re.IGNORECASE
+                )
+                if og_match2:
+                    return og_match2.group(1)
+                
+                tw_match = re.search(
+                    r'<meta[^>]+(?:name|property)=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+                    html, re.IGNORECASE
+                )
+                if tw_match:
+                    return tw_match.group(1)
+                
+                tw_match2 = re.search(
+                    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:name|property)=["\']twitter:image["\']',
+                    html, re.IGNORECASE
+                )
+                if tw_match2:
+                    return tw_match2.group(1)
+                
+                link_match = re.search(
+                    r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']',
+                    html, re.IGNORECASE
+                )
+                if link_match:
+                    return link_match.group(1)
+                    
+                return None
+                
+        except Exception as e:
+            print(f"Error fetching thumbnail for {article_url}: {e}")
+            return None
+
+
+async def fetch_missing_thumbnails(
+    session: aiohttp.ClientSession,
+    articles: List[ParsedArticle]
+) -> List[ParsedArticle]:
+    """
+    Fetch thumbnails for articles that don't have images.
+    Updates articles in-place with found image URLs or placeholder.
+    """
+    articles_needing_images = [
+        (i, article) for i, article in enumerate(articles)
+        if not article.url_to_image
+    ]
+    
+    if not articles_needing_images:
+        return articles
+    
+    print(f"Fetching thumbnails for {len(articles_needing_images)} articles...")
+    
+    semaphore = asyncio.Semaphore(IMAGE_FETCH_CONCURRENCY)
+    
+    async def fetch_and_update(idx: int, article: ParsedArticle) -> ParsedArticle:
+        image_url = await fetch_article_thumbnail(session, article.url, semaphore)
+        return ParsedArticle(
+            title=article.title,
+            description=article.description,
+            url=article.url,
+            url_to_image=image_url if image_url else PLACEHOLDER_IMAGE_URL,
+            source_name=article.source_name,
+            source_url=article.source_url,
+            category=article.category,
+            published_at=article.published_at
+        )
+    
+    tasks = [
+        fetch_and_update(idx, article)
+        for idx, article in articles_needing_images
+    ]
+    
+    updated_articles = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for (orig_idx, _), updated in zip(articles_needing_images, updated_articles):
+        if isinstance(updated, ParsedArticle):
+            articles[orig_idx] = updated
+    
+    return articles
 
 
 def parse_cnbc_feed(content: str, feed_info: Dict) -> List[ParsedArticle]:
@@ -442,8 +699,9 @@ async def fetch_all_feeds() -> List[Dict[str, Any]]:
                 all_articles.extend(result)
             elif isinstance(result, Exception):
                 print(f"Error fetching feed: {result}")
+        
+        all_articles = await fetch_missing_thumbnails(session, all_articles)
     
-    # Sort by published date (newest first)
     all_articles.sort(key=lambda x: x.published_at, reverse=True)
     
     return [article_to_dict(a) for a in all_articles]
@@ -474,7 +732,6 @@ async def fetch_feed_for_category(category: str) -> List[Dict[str, Any]]:
                 tasks.append(fetch_and_parse_feed(session, feed_key, feed_info))
         
         if not tasks:
-            # If no specific feeds for category, fetch all and filter
             tasks = [
                 fetch_and_parse_feed(session, feed_key, feed_info)
                 for feed_key, feed_info in RSS_FEEDS.items()
@@ -485,11 +742,11 @@ async def fetch_feed_for_category(category: str) -> List[Dict[str, Any]]:
         for result in results:
             if isinstance(result, list):
                 all_articles.extend(result)
+        
+        all_articles = await fetch_missing_thumbnails(session, all_articles)
     
-    # Filter by category
     filtered = [a for a in all_articles if a.category == category]
     
-    # Sort by published date
     filtered.sort(key=lambda x: x.published_at, reverse=True)
     
     return [article_to_dict(a) for a in filtered]
