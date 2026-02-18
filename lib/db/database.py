@@ -187,6 +187,26 @@ class Database:
                 ON news_articles(fetched_at DESC)
             """)
 
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS article_tags (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    article_id UUID NOT NULL REFERENCES news_articles(id) ON DELETE CASCADE,
+                    tag TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(article_id, tag)
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_article_tags_article 
+                ON article_tags(article_id)
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_article_tags_tag 
+                ON article_tags(tag)
+            """)
+
     async def ensure_user(self, clerk_user_id: str):
         """Create user if doesn't exist"""
         async with self.pool.acquire() as conn:
@@ -404,6 +424,152 @@ class Database:
             now = datetime.now(timezone.utc)
             age = now - last_fetched
             return age.total_seconds()
+
+    async def get_news_articles_paginated(
+        self,
+        category: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20
+    ) -> Dict[str, Any]:
+        """
+        Get paginated news articles with tags.
+        Returns articles, pagination metadata, and tags for each article.
+        """
+        offset = (page - 1) * page_size
+        
+        async with self.pool.acquire() as conn:
+            count_query = "SELECT COUNT(*) FROM news_articles"
+            count_params = []
+            
+            if category:
+                count_query = "SELECT COUNT(*) FROM news_articles WHERE category = $1"
+                count_params = [category]
+            
+            total_count = await conn.fetchval(count_query, *count_params)
+            total_pages = (total_count + page_size - 1) // page_size
+            
+            if category:
+                rows = await conn.fetch("""
+                    SELECT id, title, description, url, url_to_image, source_name, 
+                           source_url, category, published_at, fetched_at
+                    FROM news_articles
+                    WHERE category = $1
+                    ORDER BY published_at DESC
+                    LIMIT $2 OFFSET $3
+                """, category, page_size, offset)
+            else:
+                rows = await conn.fetch("""
+                    SELECT id, title, description, url, url_to_image, source_name, 
+                           source_url, category, published_at, fetched_at
+                    FROM news_articles
+                    ORDER BY published_at DESC
+                    LIMIT $1 OFFSET $2
+                """, page_size, offset)
+            
+            articles = [dict(row) for row in rows]
+            
+            if articles:
+                article_ids = [article['id'] for article in articles]
+                tag_rows = await conn.fetch("""
+                    SELECT article_id, tag
+                    FROM article_tags
+                    WHERE article_id = ANY($1)
+                """, article_ids)
+                
+                tags_by_article = {}
+                for tag_row in tag_rows:
+                    article_id = tag_row['article_id']
+                    if article_id not in tags_by_article:
+                        tags_by_article[article_id] = []
+                    tags_by_article[article_id].append(tag_row['tag'])
+                
+                for article in articles:
+                    article['tags'] = tags_by_article.get(article['id'], [])
+            else:
+                for article in articles:
+                    article['tags'] = []
+            
+            return {
+                'articles': articles,
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_count': total_count,
+                    'total_pages': total_pages,
+                    'has_next': page < total_pages,
+                    'has_prev': page > 1
+                }
+            }
+
+    async def get_popular_tags(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Get most popular tags with article counts.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT tag, COUNT(*) as count
+                FROM article_tags
+                GROUP BY tag
+                ORDER BY count DESC
+                LIMIT $1
+            """, limit)
+            
+            return [{'name': row['tag'], 'count': row['count']} for row in rows]
+
+    async def bulk_insert_article_tags(
+        self,
+        article_url: str,
+        tags: List[str]
+    ) -> int:
+        """
+        Insert tags for an article by URL.
+        Returns number of tags inserted.
+        """
+        if not tags:
+            return 0
+        
+        async with self.pool.acquire() as conn:
+            article_id = await conn.fetchval("""
+                SELECT id FROM news_articles WHERE url = $1
+            """, article_url)
+            
+            if not article_id:
+                return 0
+            
+            inserted = 0
+            for tag in tags:
+                try:
+                    await conn.execute("""
+                        INSERT INTO article_tags (article_id, tag)
+                        VALUES ($1, $2)
+                        ON CONFLICT (article_id, tag) DO NOTHING
+                    """, article_id, tag)
+                    inserted += 1
+                except Exception:
+                    pass
+            
+            return inserted
+
+    async def delete_article_tags(self, article_url: str) -> int:
+        """
+        Delete all tags for an article by URL.
+        Returns number of tags deleted.
+        """
+        async with self.pool.acquire() as conn:
+            article_id = await conn.fetchval("""
+                SELECT id FROM news_articles WHERE url = $1
+            """, article_url)
+            
+            if not article_id:
+                return 0
+            
+            result = await conn.execute("""
+                DELETE FROM article_tags WHERE article_id = $1
+            """, article_id)
+            
+            if "DELETE" in result:
+                return int(result.split()[-1])
+            return 0
 
     async def get_user_chats(self, clerk_user_id: str) -> List[Dict[str, Any]]:
         """List all chats for a user"""

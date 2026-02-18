@@ -7,9 +7,11 @@ import asyncio
 import aiohttp
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import xml.etree.ElementTree as ET
 import re
+
+from .tagging import extract_tags, ArticleContent
 
 # Image fetcher configuration
 IMAGE_FETCH_CONCURRENCY = 20
@@ -234,6 +236,7 @@ class ParsedArticle:
     source_url: Optional[str]
     category: str
     published_at: datetime
+    tags: List[str] = field(default_factory=list)
 
 
 # HTTP headers to mimic a browser request (helps avoid 403 from some feeds)
@@ -386,42 +389,63 @@ async def fetch_missing_thumbnails(
     """
     Fetch thumbnails for articles that don't have images.
     Updates articles in-place with found image URLs or placeholder.
+    Also extracts tags for all articles.
     """
     articles_needing_images = [
         (i, article) for i, article in enumerate(articles)
         if not article.url_to_image
     ]
     
-    if not articles_needing_images:
-        return articles
+    if articles_needing_images:
+        print(f"Fetching thumbnails for {len(articles_needing_images)} articles...")
+        
+        semaphore = asyncio.Semaphore(IMAGE_FETCH_CONCURRENCY)
+        
+        async def fetch_and_update(idx: int, article: ParsedArticle) -> ParsedArticle:
+            image_url = await fetch_article_thumbnail(session, article.url, semaphore)
+            return ParsedArticle(
+                title=article.title,
+                description=article.description,
+                url=article.url,
+                url_to_image=image_url if image_url else PLACEHOLDER_IMAGE_URL,
+                source_name=article.source_name,
+                source_url=article.source_url,
+                category=article.category,
+                published_at=article.published_at,
+                tags=article.tags
+            )
+        
+        tasks = [
+            fetch_and_update(idx, article)
+            for idx, article in articles_needing_images
+        ]
+        
+        updated_articles = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for (orig_idx, _), updated in zip(articles_needing_images, updated_articles):
+            if isinstance(updated, ParsedArticle):
+                articles[orig_idx] = updated
     
-    print(f"Fetching thumbnails for {len(articles_needing_images)} articles...")
-    
-    semaphore = asyncio.Semaphore(IMAGE_FETCH_CONCURRENCY)
-    
-    async def fetch_and_update(idx: int, article: ParsedArticle) -> ParsedArticle:
-        image_url = await fetch_article_thumbnail(session, article.url, semaphore)
-        return ParsedArticle(
-            title=article.title,
-            description=article.description,
-            url=article.url,
-            url_to_image=image_url if image_url else PLACEHOLDER_IMAGE_URL,
-            source_name=article.source_name,
-            source_url=article.source_url,
-            category=article.category,
-            published_at=article.published_at
-        )
-    
-    tasks = [
-        fetch_and_update(idx, article)
-        for idx, article in articles_needing_images
-    ]
-    
-    updated_articles = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    for (orig_idx, _), updated in zip(articles_needing_images, updated_articles):
-        if isinstance(updated, ParsedArticle):
-            articles[orig_idx] = updated
+    for i, article in enumerate(articles):
+        if not article.tags:
+            article_content = ArticleContent(
+                title=article.title,
+                description=article.description,
+                source_name=article.source_name,
+                category=article.category
+            )
+            extracted_tags = extract_tags(article_content)
+            articles[i] = ParsedArticle(
+                title=article.title,
+                description=article.description,
+                url=article.url,
+                url_to_image=article.url_to_image,
+                source_name=article.source_name,
+                source_url=article.source_url,
+                category=article.category,
+                published_at=article.published_at,
+                tags=extracted_tags
+            )
     
     return articles
 
@@ -768,7 +792,8 @@ def article_to_dict(article: ParsedArticle) -> Dict[str, Any]:
         "source_name": article.source_name,
         "source_url": article.source_url,
         "category": article.category,
-        "published_at": article.published_at
+        "published_at": article.published_at,
+        "tags": article.tags
     }
 
 

@@ -1395,24 +1395,23 @@ def transform_article_for_api(article: dict) -> dict:
     Also converts url_to_image to urlToImage.
     Converts category string to array.
     """
-    # Create a copy to avoid modifying the original
     transformed = dict(article)
     
-    # Transform source_name to source: {name}
     if "source_name" in transformed and transformed["source_name"]:
         transformed["source"] = {"name": transformed["source_name"]}
         del transformed["source_name"]
     
-    # Transform url_to_image to urlToImage
     if "url_to_image" in transformed:
         transformed["urlToImage"] = transformed["url_to_image"]
         del transformed["url_to_image"]
     
-    # Transform category string to array
     if "category" in transformed and transformed["category"]:
         cat = transformed["category"]
         if isinstance(cat, str):
             transformed["category"] = [cat]
+    
+    if "tags" not in transformed:
+        transformed["tags"] = []
     
     return transformed
 
@@ -1421,41 +1420,45 @@ def transform_article_for_api(article: dict) -> dict:
 async def handle_get_news(request):
     """
     GET /news
-    Get financial news articles
+    Get financial news articles with pagination
     
     Query parameters:
-    - category: News category (general, technology, retail, life_sciences, politics, developing_markets)
-    - max_results: Maximum number of articles (default: 10)
+    - category: News category (general, technology, crypto, forex, politics, developing_markets)
+    - page: Page number (default: 1)
+    - page_size: Number of articles per page (default: 20)
     """
     try:
         category = request.query.get("category", "general")
-        max_results = int(request.query.get("max_results", "10"))
+        page = int(request.query.get("page", "1"))
+        page_size = int(request.query.get("page_size", "20"))
         
-        # Map URL-friendly category names to internal names
         category_map = {
             "general": "general",
             "technology": "technology",
-            "retail": "retail",
-            "life_sciences": "life sciences",
+            "crypto": "crypto",
+            "forex": "forex",
             "politics": "politics",
             "developing_markets": "developing markets"
         }
         
         internal_category = category_map.get(category, "general")
         
-        # Fetch news using the global news_fetcher
-        articles = await news_fetcher.get_news(internal_category, max_results)
+        result = await db.get_news_articles_paginated(
+            category=internal_category,
+            page=page,
+            page_size=page_size
+        )
         
-        # Transform articles from database format to API format
+        articles = result["articles"]
+        pagination = result["pagination"]
+        
         articles = [transform_article_for_api(a) for a in articles]
-        
-        # Serialize articles for JSON (handle UUID, datetime, etc.)
         articles = [serialize_for_json(a) for a in articles]
         
         return web.json_response({
             "category": category,
             "articles": articles,
-            "count": len(articles)
+            "pagination": pagination
         })
     
     except Exception as e:
@@ -1476,13 +1479,9 @@ async def handle_get_latest_news(request):
     try:
         max_results = int(request.query.get("max_results", "20"))
         
-        # Fetch news using the global news_fetcher
         articles = await news_fetcher.get_latest_headlines(max_results)
         
-        # Transform articles from database format to API format
         articles = [transform_article_for_api(a) for a in articles]
-        
-        # Serialize articles for JSON (handle UUID, datetime, etc.)
         articles = [serialize_for_json(a) for a in articles]
         
         return web.json_response({
@@ -1492,6 +1491,30 @@ async def handle_get_latest_news(request):
     
     except Exception as e:
         print(f"Error in handle_get_latest_news: {e}")
+        traceback.print_exc()
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
+
+
+@require_auth
+async def handle_get_popular_tags(request):
+    """
+    GET /news/tags
+    Get popular tags with article counts
+    """
+    try:
+        limit = int(request.query.get("limit", "20"))
+        
+        tags = await db.get_popular_tags(limit)
+        
+        return web.json_response({
+            "tags": tags
+        })
+    
+    except Exception as e:
+        print(f"Error in handle_get_popular_tags: {e}")
         traceback.print_exc()
         return web.json_response(
             {"error": "Internal server error"},
@@ -1573,6 +1596,7 @@ def create_app():
     # News routes
     app.router.add_get("/news", handle_get_news)
     app.router.add_get("/news/latest", handle_get_latest_news)
+    app.router.add_get("/news/tags", handle_get_popular_tags)
 
     app.router.add_get("/health", handle_health)
     
