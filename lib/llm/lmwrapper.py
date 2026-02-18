@@ -11,6 +11,7 @@ from datetime import datetime
 from lib.retrieval.search import SearchTool
 from lib.retrieval.marketdata import MarketDataTool
 from lib.retrieval.snaptrade import get_portfolio_data
+import re
 
 routers = {
     "OPENROUTER": {
@@ -38,6 +39,61 @@ routers = {
         },
     },
 }
+
+AGENTIC_TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for current information, news, or real-time data. Use this when you need up-to-date information that may not be in your training data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to execute"
+                    },
+                    "search_type": {
+                        "type": "string",
+                        "enum": ["web", "news"],
+                        "description": "Use 'news' for recent events, 'web' for general information"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_market_data",
+            "description": "Fetch market data, stock prices, and financial fundamentals for stock tickers. Use this when the user asks about specific stocks, their prices, or financial metrics.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tickers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of stock ticker symbols (e.g., ['AAPL', 'GOOGL'])"
+                    }
+                },
+                "required": ["tickers"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_portfolio",
+            "description": "Fetch the user's linked portfolio data including positions, account balances, and recent trades. Use this when the user asks about their investments or holdings.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    }
+]
 
 
 class LM_WRAPPER:
@@ -503,6 +559,282 @@ class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
             base_instructions += "\nWhen a tool is appropriate, generate its required markdown block directly in your response. The user's interface will render it."
         
         return base_instructions
+
+    def _get_agentic_system_prompt(self, tools: List[str]) -> str:
+        """Generate system prompt for agentic mode with thinking and tool calling"""
+        
+        base = f"""You are ZECA, an advanced AI assistant developed by Zecant.
+The current date is {datetime.now().strftime("%Y-%m-%d")}.
+
+CORE PRINCIPLES:
+- Accuracy First: Only make claims you can support with evidence from search results or reliable knowledge
+- Cite Sources: When using search results, cite them as [Source: domain.com]
+- Be Concise: Get to the point quickly, avoid unnecessary preamble
+- Admit Uncertainty: If you don't know, say so - don't fabricate information
+
+AGENTIC BEHAVIOR:
+You have access to tools that can fetch real-time information. Use them strategically:
+
+1. THINK FIRST: Before using tools, think through what information you need
+   Output your reasoning in a thinking block: :::thinking\\nyour thoughts here\\n:::
+   
+2. USE TOOLS: When you need current/real-time information, call the appropriate tool:
+   - web_search: For current events, news, recent data
+   - get_market_data: For stock prices, financial data
+   - get_portfolio: For user's investment holdings
+   
+3. ITERATE: After receiving tool results, analyze them and decide if you need more information
+
+4. RESPOND: Once you have sufficient information, provide your final answer
+
+THINKING FORMAT:
+:::thinking
+What do I need to know? Which tool would help? What should I search for?
+:::
+
+VISUALIZATION TOOLS (embed in response):
+"""
+        
+        tool_specs = {
+            "stock_chart": """
+- stock_chart: :::stock_chart\\n{"ticker": "AAPL"}\\n:::
+""",
+            "graph": """
+- graph: :::graph\\n{"type": "line", "data": [...], "xAxis": {"key": "..."}, "yAxis": {"key": "..."}}\\n:::
+""",
+        }
+        
+        for tool in tools:
+            if tool in tool_specs:
+                base += tool_specs[tool]
+        
+        base += """
+
+MATH FORMATTING:
+- Display math: $$...$$
+- Inline math: \\(...\\) ONLY (never use $...$)
+"""
+        
+        return base
+
+    async def _execute_tool(self, tool_name: str, args: Dict[str, Any], clerk_user_id: str = None, db = None) -> str:
+        """Execute a tool and return the result as a string"""
+        
+        if tool_name == "web_search":
+            query = args.get("query", "")
+            search_type = args.get("search_type", "web")
+            try:
+                results, _ = await self.search_tool.multi_search(query)
+                return results
+            except Exception as e:
+                return f"Search failed: {str(e)}"
+        
+        elif tool_name == "get_market_data":
+            tickers = args.get("tickers", [])
+            if not tickers:
+                return "No tickers provided"
+            try:
+                results = []
+                for ticker in tickers[:5]:
+                    data = await self.market_data_tool.fetch_market_data(ticker)
+                    results.append(json.dumps(data))
+                return "\n\n".join(results)
+            except Exception as e:
+                return f"Market data fetch failed: {str(e)}"
+        
+        elif tool_name == "get_portfolio":
+            if not clerk_user_id or not db:
+                return "Portfolio data not available - user not authenticated or database not connected"
+            try:
+                portfolio_data = await get_portfolio_data(clerk_user_id, db, force_refresh=False)
+                if portfolio_data.get("connected") and not portfolio_data.get("error"):
+                    total_nav = portfolio_data.get("totalNav", 0)
+                    positions = portfolio_data.get("positions", [])[:20]
+                    return json.dumps({
+                        "total_nav": total_nav,
+                        "positions": positions,
+                        "accounts": portfolio_data.get("accounts", [])
+                    })
+                else:
+                    return "No portfolio linked"
+            except Exception as e:
+                return f"Portfolio fetch failed: {str(e)}"
+        
+        return f"Unknown tool: {tool_name}"
+
+    async def stream_agentic(
+        self,
+        user_message: str,
+        chat_history: List[Dict[str, Any]],
+        requested_tools: Optional[List[str]] = None,
+        max_iterations: int = 5,
+        max_tokens: int = 8000,
+        clerk_user_id: Optional[str] = None,
+        db = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Agentic loop that allows the LLM to think, use tools, and iterate.
+        
+        Yields:
+            Dicts with types:
+                - {"type": "thinking", "content": str} - thinking content
+                - {"type": "tool_call", "tool": str, "args": dict} - tool being called
+                - {"type": "tool_result", "tool": str, "result": str} - tool execution result
+                - {"type": "token", "content": str} - text tokens
+                - {"type": "done"} - generation complete
+        """
+        
+        available_tools = ["web_search", "get_market_data", "get_portfolio"]
+        enabled_tools = [t for t in available_tools if t in (requested_tools or []) or t == "web_search"]
+        
+        messages = []
+        messages.append({
+            "role": "system",
+            "content": self._get_agentic_system_prompt(requested_tools or [])
+        })
+        
+        for msg in chat_history:
+            messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
+            })
+        
+        messages.append({"role": "user", "content": user_message})
+        
+        all_thoughts = []
+        all_tool_calls = []
+        
+        for iteration in range(max_iterations):
+            thinking_content = ""
+            response_content = ""
+            tool_calls_made = []
+            in_thinking = False
+            thinking_buffer = ""
+            
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+            
+            if self.extra_headers:
+                headers.update(self.extra_headers)
+            
+            payload = {
+                "model": self.model_name,
+                "messages": messages,
+                "temperature": self.temperature,
+                "max_tokens": max_tokens,
+                "stream": True,
+            }
+            
+            if enabled_tools:
+                payload["tools"] = [t for t in AGENTIC_TOOLS_SCHEMA if t["function"]["name"] in enabled_tools]
+                payload["tool_choice"] = "auto"
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self.base_url,
+                        headers=headers,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=300, connect=30, sock_read=30),
+                    ) as response:
+                        if response.status != 200:
+                            error_text = await response.text()
+                            yield {"type": "error", "error": f"API error {response.status}: {error_text}"}
+                            return
+                        
+                        async for line in response.content:
+                            line = line.decode("utf-8").strip()
+                            if line.startswith("data: "):
+                                data = line[6:]
+                                if data.strip() == "[DONE]":
+                                    break
+                                
+                                try:
+                                    chunk = json.loads(data)
+                                    if "choices" in chunk and len(chunk["choices"]) > 0:
+                                        delta = chunk["choices"][0].get("delta", {})
+                                        
+                                        if "tool_calls" in delta:
+                                            for tc in delta["tool_calls"]:
+                                                if tc.get("function", {}).get("name"):
+                                                    tool_name = tc["function"]["name"]
+                                                    tool_args = json.loads(tc["function"].get("arguments", "{}"))
+                                                    tool_calls_made.append({
+                                                        "id": tc.get("id", ""),
+                                                        "name": tool_name,
+                                                        "args": tool_args
+                                                    })
+                                        
+                                        if "content" in delta and delta["content"]:
+                                            content = delta["content"]
+                                            response_content += content
+                                            
+                                            if ":::thinking" in content or in_thinking:
+                                                if ":::thinking" in content:
+                                                    in_thinking = True
+                                                    thinking_buffer = ""
+                                                    content = content.replace(":::thinking", "")
+                                                
+                                                if ":::" in content and thinking_buffer:
+                                                    in_thinking = False
+                                                    parts = content.split(":::", 1)
+                                                    thinking_buffer += parts[0]
+                                                    all_thoughts.append(thinking_buffer)
+                                                    yield {"type": "thinking", "content": thinking_buffer}
+                                                    content = parts[1] if len(parts) > 1 else ""
+                                                    thinking_buffer = ""
+                                                elif in_thinking:
+                                                    thinking_buffer += content
+                                                    yield {"type": "thinking_chunk", "content": content}
+                                                else:
+                                                    yield {"type": "token", "content": content}
+                                            else:
+                                                yield {"type": "token", "content": content}
+                                
+                                except json.JSONDecodeError:
+                                    continue
+            
+            except Exception as e:
+                yield {"type": "error", "error": str(e)}
+                return
+            
+            if tool_calls_made:
+                messages.append({"role": "assistant", "content": response_content, "tool_calls": [
+                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": json.dumps(tc["args"])}}
+                    for tc in tool_calls_made
+                ]})
+                
+                for tc in tool_calls_made:
+                    tool_name = tc["name"]
+                    tool_args = tc["args"]
+                    
+                    yield {"type": "tool_call", "tool": tool_name, "args": tool_args}
+                    
+                    result = await self._execute_tool(tool_name, tool_args, clerk_user_id, db)
+                    
+                    all_tool_calls.append({
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "result": result[:1000] if len(result) > 1000 else result
+                    })
+                    
+                    yield {"type": "tool_result", "tool": tool_name, "result": result[:500]}
+                    
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result
+                    })
+                
+                continue
+            
+            break
+        
+        yield {"type": "thoughts_complete", "thoughts": all_thoughts}
+        yield {"type": "tool_log", "calls": all_tool_calls}
+        yield {"type": "done"}
 
     async def stream_with_tools_execution(
         self,

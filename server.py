@@ -218,50 +218,74 @@ async def handle_generate(request):
         
         # Stream LLM response with search support
         assistant_response = ""
+        pending_thoughts = []
+        pending_tool_calls = []
         try:
-            async for token_data in lm.stream_with_tools_execution(
+            async for token_data in lm.stream_agentic(
                 user_message=message,
-                chat_history=chat_history[:-1],  # Exclude the message we just added
+                chat_history=chat_history[:-1],
                 requested_tools=tools,
-                auto_search=True,  # Enable automatic web search
+                max_iterations=5,
                 clerk_user_id=clerk_user_id,
                 db=db,
             ):
-                if token_data["type"] == "search_performed":
-                    # Forward search event to frontend
-                    search_event = {
-                        "type": "search_performed",
-                        "query": token_data.get("query", ""),
+                if token_data["type"] == "thinking":
+                    await response.write(
+                        f"data: {json.dumps({'type': 'thinking', 'content': token_data.get('content', '')})}\n\n".encode()
+                    )
+                    pending_thoughts.append(token_data.get("content", ""))
+                    
+                elif token_data["type"] == "thinking_chunk":
+                    await response.write(
+                        f"data: {json.dumps({'type': 'thinking_chunk', 'content': token_data.get('content', '')})}\n\n".encode()
+                    )
+                    
+                elif token_data["type"] == "tool_call":
+                    tool_event = {
+                        "type": "tool_call",
+                        "tool": token_data.get("tool", ""),
+                        "args": token_data.get("args", {}),
                     }
                     await response.write(
-                        f"data: {json.dumps(search_event)}\n\n".encode()
+                        f"data: {json.dumps(tool_event)}\n\n".encode()
                     )
-                    # Small delay to ensure frontend processes search event before tokens
+                    await asyncio.sleep(0.1)
+                    
+                elif token_data["type"] == "tool_result":
+                    pending_tool_calls.append({
+                        "tool": token_data.get("tool", ""),
+                        "result": token_data.get("result", ""),
+                    })
+                    tool_result_event = {
+                        "type": "tool_result",
+                        "tool": token_data.get("tool", ""),
+                        "result": token_data.get("result", "")[:500],
+                    }
+                    await response.write(
+                        f"data: {json.dumps(tool_result_event)}\n\n".encode()
+                    )
                     await asyncio.sleep(0.1)
                     
                 elif token_data["type"] == "token":
                     token = token_data["content"]
                     assistant_response += token
-                    
-                    # Send token via SSE
                     await response.write(
                         f"data: {json.dumps({'type': 'token', 'content': token})}\n\n".encode()
                     )
-                    
-                elif token_data["type"] == "tool_call":
-                    # Future: Handle other tool calls
+                
+                elif token_data["type"] == "thoughts_complete":
                     await response.write(
-                        f"data: {json.dumps(token_data)}\n\n".encode()
+                        f"data: {json.dumps({'type': 'thoughts_complete', 'thoughts': token_data.get('thoughts', [])})}\n\n".encode()
                     )
                 
-                elif token_data["type"] == "market_data_fetched":
-                    # Forward market data event to frontend
-                    market_data_event = {
-                        "type": "market_data_fetched",
-                        "tickers": token_data.get("tickers", []),
-                    }
+                elif token_data["type"] == "tool_log":
                     await response.write(
-                        f"data: {json.dumps(market_data_event)}\n\n".encode()
+                        f"data: {json.dumps({'type': 'tool_log', 'calls': token_data.get('calls', [])})}\n\n".encode()
+                    )
+                
+                elif token_data["type"] == "error":
+                    await response.write(
+                        f"data: {json.dumps({'type': 'error', 'error': token_data.get('error', 'Unknown error')})}\n\n".encode()
                     )
             
             # Store assistant message
