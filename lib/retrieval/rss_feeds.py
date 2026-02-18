@@ -15,6 +15,15 @@ import re
 IMAGE_FETCH_CONCURRENCY = 20
 IMAGE_FETCH_TIMEOUT = 20  # seconds
 PLACEHOLDER_IMAGE_URL = "https://placehold.co/341x192?text=NEWS"
+MAX_HEADER_SIZE = 65536  # bytes - for connector
+
+
+class LargeHeaderConnector(aiohttp.TCPConnector):
+    """Custom connector with increased header size limits for sites with large cookies (e.g., Yahoo)."""
+    
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault('max_field_size', MAX_HEADER_SIZE)
+        super().__init__(*args, **kwargs)
 
 # RSS Feed sources
 RSS_FEEDS = {
@@ -134,11 +143,6 @@ RSS_FEEDS = {
         "url": "https://www.entrepreneur.com/latest.rss",
         "category": "general",
         "source_name": "Entrepreneur",
-    },
-    "moneyweb_sa": {
-        "url": "https://www.moneyweb.co.za/feed",
-        "category": "general",
-        "source_name": "MoneyWeb",
     },
     "express_personal_finance": {
         "url": "http://feeds.feedburner.com/daily-express-personal-finance-news",
@@ -687,7 +691,8 @@ async def fetch_all_feeds() -> List[Dict[str, Any]]:
     """
     all_articles = []
     
-    async with aiohttp.ClientSession() as session:
+    connector = LargeHeaderConnector(limit=IMAGE_FETCH_CONCURRENCY)
+    async with aiohttp.ClientSession(connector=connector) as session:
         tasks = []
         for feed_key, feed_info in RSS_FEEDS.items():
             tasks.append(fetch_and_parse_feed(session, feed_key, feed_info))
@@ -725,7 +730,8 @@ async def fetch_feed_for_category(category: str) -> List[Dict[str, Any]]:
     """
     all_articles = []
     
-    async with aiohttp.ClientSession() as session:
+    connector = LargeHeaderConnector(limit=IMAGE_FETCH_CONCURRENCY)
+    async with aiohttp.ClientSession(connector=connector) as session:
         tasks = []
         for feed_key, feed_info in RSS_FEEDS.items():
             if feed_info["category"] == category:
@@ -754,9 +760,6 @@ async def fetch_feed_for_category(category: str) -> List[Dict[str, Any]]:
 
 def article_to_dict(article: ParsedArticle) -> Dict[str, Any]:
     """Convert ParsedArticle to dictionary for database storage."""
-    # Store date as ISO format string for proper JSON serialization
-    published_at_str = article.published_at.isoformat() if isinstance(article.published_at, datetime) else str(article.published_at)
-    
     return {
         "title": article.title,
         "description": article.description,
@@ -765,7 +768,7 @@ def article_to_dict(article: ParsedArticle) -> Dict[str, Any]:
         "source_name": article.source_name,
         "source_url": article.source_url,
         "category": article.category,
-        "published_at": published_at_str
+        "published_at": article.published_at
     }
 
 
