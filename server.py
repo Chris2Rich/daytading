@@ -173,6 +173,8 @@ async def handle_generate(request):
             )
 
         is_new_chat = False
+        max_iterations_raw = data.get("max_iterations", 5)
+        max_iterations = min(max(1, int(max_iterations_raw or 5)), 10) if max_iterations_raw else 5
         
         # Create new chat if no chat_id provided
         if not chat_id:
@@ -224,7 +226,7 @@ async def handle_generate(request):
                 user_message=message,
                 chat_history=chat_history[:-1],
                 requested_tools=tools,
-                max_iterations=5,
+                max_iterations=max_iterations,
                 clerk_user_id=clerk_user_id,
                 db=db,
             ):
@@ -247,7 +249,7 @@ async def handle_generate(request):
                     tool_result_event = {
                         "type": "tool_result",
                         "tool": token_data.get("tool", ""),
-                        "result": token_data.get("result", "")[:500],
+                        "result": token_data.get("result", ""),
                     }
                     await response.write(
                         f"data: {json.dumps(tool_result_event)}\n\n".encode()

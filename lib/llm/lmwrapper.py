@@ -787,15 +787,25 @@ MATH FORMATTING:
                     
                     yield {"type": "tool_call", "tool": tool_name, "args": tool_args}
                     
-                    result = await self._execute_tool(tool_name, tool_args, clerk_user_id, db)
+                    tool_failures = 0
+                    max_tool_failures = 3
+                    try:
+                        result = await self._execute_tool(tool_name, tool_args, clerk_user_id, db)
+                    except Exception as e:
+                        result = f"Error executing {tool_name}: {str(e)}"
+                        yield {"type": "tool_error", "tool": tool_name, "error": str(e)}
+                        tool_failures += 1
+                        if tool_failures >= max_tool_failures:
+                            yield {"type": "error", "error": "Too many tool failures, stopping"}
+                            return
                     
                     all_tool_calls.append({
                         "tool": tool_name,
                         "args": tool_args,
-                        "result": result[:1000] if len(result) > 1000 else result
+                        "result": result[:32000] if len(result) > 32000 else result
                     })
                     
-                    yield {"type": "tool_result", "tool": tool_name, "result": result[:500]}
+                    yield {"type": "tool_result", "tool": tool_name, "result": result}
                     
                     messages.append({
                         "role": "tool",
@@ -809,168 +819,3 @@ MATH FORMATTING:
         
         yield {"type": "tool_log", "calls": all_tool_calls}
         yield {"type": "done"}
-
-    async def stream_with_tools_execution(
-        self,
-        user_message: str,
-        chat_history: List[Dict[str, Any]],
-        requested_tools: Optional[List[str]] = None,
-        max_tokens: int = 8000,
-        max_tool_iterations: int = 5,
-        auto_search: bool = True,
-        clerk_user_id: Optional[str] = None,
-        db = None,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        Stream response and automatically execute tools if requested by LLM.
-        
-        This streams tokens and can signal when search was performed.
-        
-        Yields:
-            Dicts with:
-                - {"type": "token", "content": str} for text tokens
-                - {"type": "search_performed", "query": str, "results": str} when search happens
-                - {"type": "market_data_fetched", "tickers": List[str]} when market data is fetched
-        """
-        
-        # FIX #1: Execute tools ONCE and store contexts
-        search_context = None
-        search_query = None
-        
-        # Check if search should be performed
-        if auto_search and "search" in (requested_tools or []):
-            try:
-                if await self.should_perform_search(user_message):
-                    search_results, query = await self.search_tool.multi_search(user_message)
-                    
-                    # Format search context for LLM
-                    search_context = f"""
-SEARCH RESULTS for query: "{query}"
-
-{search_results}
-
-IMPORTANT: Base your response on these search results. Cite sources with [Source: URL].
-"""
-                    
-                    # Yield search notification to frontend
-                    yield {
-                        "type": "search_performed",
-                        "query": query,
-                        "results": search_results[:500]  # Send summary to frontend
-                    }
-            except Exception as e:
-                print(f"Search failed: {e}")
-                # Yield error event
-                yield {
-                    "type": "tool_error",
-                    "tool": "search",
-                    "error": str(e)
-                }
-        
-        # Check if market data should be fetched
-        market_data_context = None
-        market_data_tickers = []
-        if "market_data" in (requested_tools):
-            try:
-                if await self.should_fetch_market_data(user_message):
-                    market_data_context, market_data_tickers = await self.market_data_tool.fetch_data(user_message)
-                    
-                    if market_data_tickers:
-                        # Yield market data notification to frontend
-                        yield {
-                            "type": "market_data_fetched",
-                            "tickers": market_data_tickers
-                        }
-            except Exception as e:
-                print(f"Market data fetch failed: {e}")
-                # Yield error event
-                yield {
-                    "type": "tool_error",
-                    "tool": "market_data",
-                    "error": str(e)
-                }
-        
-        # Check if portfolio data should be fetched
-        portfolio_context = None
-        if "portfolio" in (requested_tools or []) and clerk_user_id and db:
-            try:
-                
-                portfolio_data = await get_portfolio_data(clerk_user_id, db, force_refresh=False)
-                
-                if portfolio_data.get("connected") and not portfolio_data.get("error"):
-                    # Format portfolio context for LLM
-                    total_nav = portfolio_data.get("totalNav", 0)
-                    accounts = portfolio_data.get("accounts", [])
-                    positions = portfolio_data.get("positions", [])
-                    trades = portfolio_data.get("trades", [])[:10]  # Last 10 trades
-                    
-                    portfolio_context = f"""
-        USER'S PORTFOLIO DATA:
-
-        Total Portfolio Value (NAV): ${total_nav:,.2f}
-
-        Accounts ({len(accounts)} total):
-        """
-                    for acc in accounts:
-                        portfolio_context += f"- {acc.get('name')} ({acc.get('brokerage')}): {acc.get('type')}\n"
-                    
-                    portfolio_context += f"\nPositions ({len(positions)} total):\n"
-                    for pos in positions[:20]:  # Top 20 positions
-                        symbol = pos.get("symbol", {})
-                        ticker = symbol.get("symbol") if isinstance(symbol, dict) else symbol
-                        quantity = pos.get("fractional_units", 0)
-                        price = pos.get("price", 0)
-                        value = price * abs(quantity)
-                        portfolio_context += f"- {ticker}: {quantity:.4f} shares @ ${price:.2f} = ${value:,.2f}\n"
-                    
-                    if trades:
-                        portfolio_context += f"\nRecent Trades ({len(trades)} shown):\n"
-                        for trade in trades:
-                            portfolio_context += f"- {trade.get('date')}: {trade.get('side')} {trade.get('qty')} {trade.get('ticker')} @ ${trade.get('price', 0):.2f}\n"
-                    
-                    portfolio_context += "\nIMPORTANT: Use this portfolio data to answer questions about the user's holdings, positions, and trades."
-                    
-                    # Yield portfolio notification to frontend
-                    yield {
-                        "type": "portfolio_fetched",
-                        "total_nav": total_nav,
-                        "num_positions": len(positions),
-                        "num_accounts": len(accounts)
-                    }
-            except Exception as e:
-                print(f"Portfolio fetch failed: {e}")
-                yield {
-                    "type": "tool_error",
-                    "tool": "portfolio",
-                    "error": str(e)
-                }
-
-        # Pass pre-fetched contexts to streaming function
-        async for token in self.stream_async_with_context(
-            user_message=user_message,
-            chat_history=chat_history,
-            requested_tools=requested_tools,
-            max_tokens=max_tokens,
-            search_context=search_context,
-            market_data_context=market_data_context,
-            portfolio_context=portfolio_context,  # ADD THIS
-        ):
-            yield {
-                "type": "token",
-                "content": token
-            }
-        
-        # FIX #1: Pass pre-fetched contexts to streaming function
-        # This ensures tools are executed only ONCE and contexts are properly injected
-        async for token in self.stream_async_with_context(
-            user_message=user_message,
-            chat_history=chat_history,
-            requested_tools=requested_tools,
-            max_tokens=max_tokens,
-            search_context=search_context,
-            market_data_context=market_data_context,
-        ):
-            yield {
-                "type": "token",
-                "content": token
-            }
