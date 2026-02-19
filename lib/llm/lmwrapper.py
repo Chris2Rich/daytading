@@ -701,7 +701,73 @@ MATH FORMATTING:
         
         messages.append({"role": "user", "content": user_message})
         
+        proactive_context = ""
+        
+        if "web_search" in enabled_tools:
+            try:
+                should_search = await self.should_perform_search(user_message)
+                if should_search:
+                    yield {"type": "proactive_fetch", "tool": "web_search", "status": "fetching"}
+                    search_results, _ = await self.search_tool.multi_search(user_message)
+                    proactive_context += f"\n\nWEB SEARCH RESULTS:\n{search_results}\n"
+                    yield {"type": "proactive_fetch", "tool": "web_search", "status": "complete"}
+            except Exception as e:
+                yield {"type": "proactive_fetch", "tool": "web_search", "status": "error", "error": str(e)}
+        
+        if "get_market_data" in enabled_tools:
+            try:
+                should_fetch_market = await self.should_fetch_market_data(user_message)
+                if should_fetch_market:
+                    yield {"type": "proactive_fetch", "tool": "market_data", "status": "fetching"}
+                    import re
+                    tickers = re.findall(r'\b[A-Z]{1,5}\b', user_message)
+                    tickers = [t for t in tickers if t not in ['AI', 'I', 'A', 'GET', 'USE', 'FOR', 'THE', 'AND', 'ARE', 'CAN', 'HAS', 'WAS', 'BUT', 'NOT', 'YOU', 'ALL', 'NEW', 'NOW', 'THAN', 'THEN', 'WHAT', 'WHEN', 'WHERE', 'WHO', 'WHY', 'HOW', 'THIS', 'THAT', 'WITH', 'FROM']]
+                    tickers = list(set(tickers))[:5]
+                    if tickers:
+                        results = []
+                        for ticker in tickers:
+                            data = await self.market_data_tool.fetch_market_data(ticker)
+                            results.append(json.dumps(data))
+                        proactive_context += f"\n\nMARKET DATA:\n{chr(10).join(results)}\n"
+                    yield {"type": "proactive_fetch", "tool": "market_data", "status": "complete"}
+            except Exception as e:
+                yield {"type": "proactive_fetch", "tool": "market_data", "status": "error", "error": str(e)}
+        
+        if "get_portfolio" in enabled_tools and clerk_user_id and db:
+            try:
+                yield {"type": "proactive_fetch", "tool": "portfolio", "status": "fetching"}
+                portfolio_data = await get_portfolio_data(clerk_user_id, db, force_refresh=False)
+                if portfolio_data.get("connected") and not portfolio_data.get("error"):
+                    total_nav = portfolio_data.get("totalNav", 0)
+                    positions = portfolio_data.get("positions", [])[:20]
+                    accounts = portfolio_data.get("accounts", [])
+                    trades = portfolio_data.get("trades", [])[:10]
+                    
+                    portfolio_str = f"Portfolio Value: ${total_nav:,.2f}\n"
+                    portfolio_str += f"Accounts: {len(accounts)}\n"
+                    portfolio_str += f"Positions: {len(positions)}\n"
+                    portfolio_str += "Top Positions:\n"
+                    for pos in positions[:10]:
+                        symbol = pos.get("symbol", {})
+                        ticker = symbol.get("symbol") if isinstance(symbol, dict) else symbol
+                        qty = pos.get("fractional_units", 0)
+                        price = pos.get("price", 0)
+                        portfolio_str += f"  {ticker}: {qty:.4f} @ ${price:.2f}\n"
+                    
+                    proactive_context += f"\n\nUSER PORTFOLIO:\n{portfolio_str}\n"
+                yield {"type": "proactive_fetch", "tool": "portfolio", "status": "complete"}
+            except Exception as e:
+                yield {"type": "proactive_fetch", "tool": "portfolio", "status": "error", "error": str(e)}
+        
+        if proactive_context:
+            messages.append({
+                "role": "system",
+                "content": f"CONTEXT FROM PRE-FETCHED DATA:{proactive_context}\n\nUse this pre-fetched data to answer the user's question. If you need more specific information, you can still use tools."
+            })
+        
         all_tool_calls = []
+        tool_failures = 0
+        max_tool_failures = 3
         
         for iteration in range(max_iterations):
             response_content = ""
@@ -787,8 +853,6 @@ MATH FORMATTING:
                     
                     yield {"type": "tool_call", "tool": tool_name, "args": tool_args}
                     
-                    tool_failures = 0
-                    max_tool_failures = 3
                     try:
                         result = await self._execute_tool(tool_name, tool_args, clerk_user_id, db)
                     except Exception as e:

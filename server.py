@@ -220,7 +220,6 @@ async def handle_generate(request):
         
         # Stream LLM response with agentic loop
         assistant_response = ""
-        pending_tool_calls = []
         try:
             async for token_data in lm.stream_agentic(
                 user_message=message,
@@ -242,10 +241,6 @@ async def handle_generate(request):
                     await asyncio.sleep(0.1)
                     
                 elif token_data["type"] == "tool_result":
-                    pending_tool_calls.append({
-                        "tool": token_data.get("tool", ""),
-                        "result": token_data.get("result", ""),
-                    })
                     tool_result_event = {
                         "type": "tool_result",
                         "tool": token_data.get("tool", ""),
@@ -253,6 +248,18 @@ async def handle_generate(request):
                     }
                     await response.write(
                         f"data: {json.dumps(tool_result_event)}\n\n".encode()
+                    )
+                    await asyncio.sleep(0.1)
+                
+                elif token_data["type"] == "tool_error":
+                    await response.write(
+                        f"data: {json.dumps({'type': 'tool_error', 'tool': token_data.get('tool', ''), 'error': token_data.get('error', '')})}\n\n".encode()
+                    )
+                    await asyncio.sleep(0.1)
+                    
+                elif token_data["type"] == "proactive_fetch":
+                    await response.write(
+                        f"data: {json.dumps({'type': 'proactive_fetch', 'tool': token_data.get('tool', ''), 'status': token_data.get('status', ''), 'error': token_data.get('error', '')})}\n\n".encode()
                     )
                     await asyncio.sleep(0.1)
                     
