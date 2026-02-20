@@ -514,7 +514,17 @@ class MLTradingStrategy(Strategy):
             if symbol not in self.models:
                 # Create new instance if missing
                 self.models[symbol] = self.sys_config.model_type(**self.sys_config.model_params)
-                
+            
+            # Set feature names for models that need them
+            if hasattr(self.models[symbol], 'feature_names'):
+                self.models[symbol].feature_names = cols_to_keep
+            
+            # Skip training for rules-based models
+            if not self.models[symbol].needs_training:
+                self.models_trained = True
+                self.log.info(f"Skipping training for {symbol} (rules-based model)")
+                continue
+            
             self.models[symbol].train(X_final, y=y_final)
             
         self.models_trained = True

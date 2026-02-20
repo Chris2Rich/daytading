@@ -512,3 +512,104 @@ def lagged_features(data: Dict[str, pd.DataFrame], symbol: str,
         result[f'{feature}_lag{lag}_{symbol}'] = df[feature].shift(lag)
     
     return result
+
+
+def adx_feature(data: Dict[str, pd.DataFrame], symbol: str, period: int = 14) -> pd.DataFrame:
+    """
+    Calculate Average Directional Index (ADX).
+    Measures trend strength regardless of direction.
+    ADX > 25 indicates a strong trend.
+    
+    Args:
+        data: Dictionary of symbol -> OHLCV dataframe
+        symbol: Symbol to calculate ADX for
+        period: ADX period
+        
+    Returns:
+        DataFrame with ADX, +DI, and -DI values
+    """
+    if symbol not in data:
+        raise ValueError(f"Symbol {symbol} not found in data")
+    
+    df = data[symbol]
+    
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    
+    # True Range
+    high_low = high - low
+    high_close = np.abs(high - close.shift())
+    low_close = np.abs(low - close.shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    
+    # Directional Movement
+    up_move = high - high.shift()
+    down_move = low.shift() - low
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values using EMA
+    atr = tr.ewm(span=period, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, adjust=False).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, adjust=False).mean() / atr
+    
+    # ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.ewm(span=period, adjust=False).mean()
+    
+    return pd.DataFrame({
+        f'adx_{symbol}_{period}': adx,
+        f'plus_di_{symbol}_{period}': plus_di,
+        f'minus_di_{symbol}_{period}': minus_di
+    })
+
+
+def ema_feature(data: Dict[str, pd.DataFrame], symbol: str, period: int = 9) -> pd.Series:
+    """
+    Calculate Exponential Moving Average (EMA).
+    
+    Args:
+        data: Dictionary of symbol -> OHLCV dataframe
+        symbol: Symbol to calculate EMA for
+        period: EMA period
+        
+    Returns:
+        Series of EMA values
+    """
+    if symbol not in data:
+        raise ValueError(f"Symbol {symbol} not found in data")
+    
+    df = data[symbol]
+    ema = df['close'].ewm(span=period, adjust=False).mean()
+    
+    return ema.rename(f'ema_{symbol}_{period}')
+
+
+def donchian_feature(data: Dict[str, pd.DataFrame], symbol: str, period: int = 20) -> pd.DataFrame:
+    """
+    Calculate Donchian Channel (20-day high/low breakout).
+    
+    Args:
+        data: Dictionary of symbol -> OHLCV dataframe
+        symbol: Symbol to calculate for
+        period: Lookback period
+        
+    Returns:
+        DataFrame with upper band (high), lower band (low), and middle
+    """
+    if symbol not in data:
+        raise ValueError(f"Symbol {symbol} not found in data")
+    
+    df = data[symbol]
+    
+    upper = df['high'].rolling(window=period).max()
+    lower = df['low'].rolling(window=period).min()
+    middle = (upper + lower) / 2
+    
+    return pd.DataFrame({
+        f'donchian_upper_{symbol}_{period}': upper,
+        f'donchian_lower_{symbol}_{period}': lower,
+        f'donchian_middle_{symbol}_{period}': middle
+    })

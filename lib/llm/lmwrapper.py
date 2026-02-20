@@ -92,6 +92,94 @@ AGENTIC_TOOLS_SCHEMA = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "research_agent",
+            "description": "Search academic papers and financial knowledge bases. Use when user asks about research, papers, theories, concepts, or wants to understand financial concepts from authoritative sources.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The research query or concept to search for"
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": ["arxiv", "wikipedia", "both"],
+                        "description": "Source to search: arxiv (academic papers), wikipedia (concepts), or both"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analysis_agent",
+            "description": "Analyze company fundamentals, valuations, and financial metrics. Use when user asks about analysis, DCF valuations, financial ratios, or wants detailed company analysis.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (e.g., AAPL, MSFT)"
+                    },
+                    "analysis_type": {
+                        "type": "string",
+                        "enum": ["fundamentals", "valuation", "ratios", "full"],
+                        "description": "Type of analysis: fundamentals (basic financials), valuation (DCF, target price), ratios (PE, etc), full (all)"
+                    }
+                },
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trading_agent",
+            "description": "Design trading strategies, run backtests, or get technical indicators. Use when user asks about trading strategies, backtesting, or technical analysis.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create_strategy", "backtest", "indicators"],
+                        "description": "Action: create_strategy (design new strategy), backtest (test strategy on historical data), indicators (get technical indicators)"
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "Parameters for the action"
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "market_agent",
+            "description": "Get real-time market data including prices, news, and options. Use when user asks about current stock prices, market news, or options data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["price", "news", "options", "economic"],
+                        "description": "Action: price (current price), news (latest news), options (options chain), economic (economic indicators)"
+                    },
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol (required for price/news/options)"
+                    }
+                },
+                "required": ["action"]
+            }
+        }
     }
 ]
 
@@ -236,8 +324,9 @@ class LM_WRAPPER:
 class LM_WRAPPER_WITH_TOOLS(LM_WRAPPER):
     """Extended LM wrapper with tool support"""
     
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, db=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.db = db
         self.search_tool = SearchTool(self)
         self.market_data_tool = MarketDataTool()
         # Initialize light model for quick checks (same as title generation)
@@ -573,7 +662,7 @@ CORE PRINCIPLES:
 - Admit Uncertainty: If you don't know, say so - don't fabricate information
 
 AGENTIC BEHAVIOR:
-You have access to tools that can fetch real-time information. Use them strategically:
+You have access to tools that can fetch real-time information and specialized agents. Use them strategically:
 
 1. THINK FIRST: Before using tools, think through what information you need
    Output your reasoning in a thinking block: :::thinking\\nyour thoughts here\\n:::
@@ -583,9 +672,15 @@ You have access to tools that can fetch real-time information. Use them strategi
    - get_market_data: For stock prices, financial data
    - get_portfolio: For user's investment holdings
    
-3. ITERATE: After receiving tool results, analyze them and decide if you need more information
+3. USE SPECIALIZED AGENTS: For complex financial tasks, use agent tools:
+   - research_agent: Search academic papers (arXiv) and financial concepts (Wikipedia)
+   - analysis_agent: Analyze company fundamentals, valuations, financial ratios
+   - trading_agent: Design trading strategies, backtests, technical indicators
+   - market_agent: Get real-time prices, news, options data
+   
+4. ITERATE: After receiving tool results, analyze them and decide if you need more information
 
-4. RESPOND: Once you have sufficient information, provide your final answer
+5. RESPOND: Once you have sufficient information, provide your final answer
 
 THINKING FORMAT:
 :::thinking
@@ -660,6 +755,94 @@ MATH FORMATTING:
             except Exception as e:
                 return f"Portfolio fetch failed: {str(e)}"
         
+        elif tool_name == "research_agent":
+            query = args.get("query", "")
+            source = args.get("source", "both")
+            try:
+                from lib.agents.research_agent import ResearchAgent
+                from lib.retrieval.research_ingestion import ResearchIngestion
+                
+                ingestion = ResearchIngestion(self.db) if self.db else None
+                agent = ResearchAgent(ingestion, self)
+                
+                result = ""
+                if source in ["arxiv", "both"]:
+                    result = await agent.research_client.find_papers(query)
+                if source in ["wikipedia", "both"]:
+                    wiki = await agent.research_client.explain_concept(query)
+                    if result:
+                        result = f"{result}\n\n{wiki}"
+                    else:
+                        result = wiki
+                return result or "No results found"
+            except Exception as e:
+                return f"Research agent failed: {str(e)}"
+        
+        elif tool_name == "analysis_agent":
+            ticker = args.get("ticker", "")
+            analysis_type = args.get("analysis_type", "full")
+            if not ticker:
+                return "No ticker provided"
+            try:
+                from lib.agents.analysis_agent import AnalysisAgent
+                from lib.agents.base import AgentContext
+                
+                agent = AnalysisAgent(self)
+                ctx = AgentContext(
+                    chat_history=[],
+                    entity_memory={},
+                    research_results=[],
+                    market_data={}
+                )
+                
+                query = f"Analyze {ticker} {analysis_type}"
+                response = await agent.execute(query, ctx)
+                return response.content
+            except Exception as e:
+                return f"Analysis agent failed: {str(e)}"
+        
+        elif tool_name == "trading_agent":
+            action = args.get("action", "")
+            params = args.get("params", {})
+            try:
+                from lib.agents.trading_agent import TradingAgent
+                from lib.agents.base import AgentContext
+                
+                agent = TradingAgent(self, self.db)
+                ctx = AgentContext(
+                    chat_history=[],
+                    entity_memory={},
+                    research_results=[],
+                    market_data={}
+                )
+                
+                query = f"{action} {json.dumps(params)}" if params else action
+                response = await agent.execute(query, ctx)
+                return response.content
+            except Exception as e:
+                return f"Trading agent failed: {str(e)}"
+        
+        elif tool_name == "market_agent":
+            action = args.get("action", "")
+            ticker = args.get("ticker", "")
+            try:
+                from lib.agents.market_agent import MarketAgent
+                from lib.agents.base import AgentContext
+                
+                agent = MarketAgent(self)
+                ctx = AgentContext(
+                    chat_history=[],
+                    entity_memory={},
+                    research_results=[],
+                    market_data={}
+                )
+                
+                query = f"Get {action} for {ticker}" if ticker else f"Get {action}"
+                response = await agent.execute(query, ctx)
+                return response.content
+            except Exception as e:
+                return f"Market agent failed: {str(e)}"
+        
         return f"Unknown tool: {tool_name}"
 
     async def stream_agentic(
@@ -684,7 +867,15 @@ MATH FORMATTING:
                 - {"type": "done"} - generation complete
         """
         
-        available_tools = ["web_search", "get_market_data", "get_portfolio"]
+        available_tools = [
+            "web_search", 
+            "get_market_data", 
+            "get_portfolio",
+            "research_agent",
+            "analysis_agent", 
+            "trading_agent", 
+            "market_agent"
+        ]
         enabled_tools = [t for t in available_tools if t in (requested_tools or []) or t == "web_search"]
         
         messages = []
@@ -883,3 +1074,282 @@ MATH FORMATTING:
         
         yield {"type": "tool_log", "calls": all_tool_calls}
         yield {"type": "done"}
+
+
+class LM_WRAPPER_WITH_AGENTS(LM_WRAPPER_WITH_TOOLS):
+    """
+    Extended LM wrapper with subagent orchestration.
+    Routes queries to specialized agents (Research, Analysis, Trading, Market)
+    based on intent classification.
+    """
+    
+    def __init__(self, *args, db=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.db = db
+        
+        # Lazy imports to avoid circular dependencies
+        self._orchestrator = None
+        self._research_ingestion = None
+        self._context_manager = None
+    
+    @property
+    def orchestrator(self):
+        if self._orchestrator is None:
+            from lib.agents import OrchestratorAgent
+            from lib.agents.research_agent import ResearchAgent
+            from lib.agents.analysis_agent import AnalysisAgent
+            from lib.agents.trading_agent import TradingAgent
+            from lib.agents.market_agent import MarketAgent
+            from lib.retrieval.research_ingestion import ResearchIngestion
+            
+            self._research_ingestion = ResearchIngestion(self.db) if self.db else None
+            
+            self._orchestrator = OrchestratorAgent(
+                research_agent=ResearchAgent(self._research_ingestion, self),
+                analysis_agent=AnalysisAgent(self),
+                trading_agent=TradingAgent(self, self.db),
+                market_agent=MarketAgent(self),
+                llm_wrapper=self
+            )
+        return self._orchestrator
+    
+    @property
+    def context_manager(self):
+        if self._context_manager is None:
+            from lib.context import ContextManager
+            self._context_manager = ContextManager()
+        return self._context_manager
+
+    async def stream_with_agents(
+        self,
+        user_message: str,
+        chat_history: List[Dict[str, Any]],
+        requested_tools: Optional[List[str]] = None,
+        max_tokens: int = 8000,
+        clerk_user_id: Optional[str] = None,
+        db = None,
+        chat_id: str = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream response with subagent orchestration.
+        
+        Yields events:
+        - agent_routing: Intent classification result
+        - agent_start: Agent begins work
+        - agent_progress: Agent intermediate update
+        - agent_complete: Agent finished
+        - token: Text tokens
+        - done: Generation complete
+        """
+        from lib.agents.base import AgentContext
+        
+        # Build context for agents
+        entity_memory = []
+        if db and chat_id:
+            try:
+                entity_memory = await db.get_entity_memory(chat_id)
+            except:
+                pass
+        
+        context = AgentContext(
+            chat_history=chat_history[-20:],  # Last 20 messages
+            entity_memory=self._build_entity_memory_dict(entity_memory),
+            research_results=[],
+            market_data={}
+        )
+        
+        # Always start with orchestrator analysis
+        yield {
+            "type": "agent_start",
+            "agent": "orchestrator",
+            "task": "Analyzing query and routing to appropriate agents..."
+        }
+        
+        # Classify intent
+        agent_types = self.orchestrator.classify_intent(user_message)
+        
+        yield {
+            "type": "agent_routing",
+            "agents": [at.value for at in agent_types],
+            "confidence": 0.85
+        }
+        
+        # Mark orchestrator complete
+        yield {
+            "type": "agent_complete",
+            "agent": "orchestrator",
+            "summary": f"Routed to: {', '.join([at.value for at in agent_types])}"
+        }
+        
+        # Execute each relevant agent
+        agent_order = 0
+        agent_summaries = []
+        
+        for agent_type in agent_types:
+            agent = self.orchestrator.get_agent(agent_type)
+            if not agent:
+                continue
+            
+            agent_order += 1
+            
+            # Determine task description
+            task_desc = self._get_agent_task_description(agent_type, user_message)
+            
+            yield {
+                "type": "agent_start",
+                "agent": agent_type.value,
+                "task": task_desc,
+                "order": agent_order
+            }
+            
+            try:
+                # Execute agent
+                response = await agent.execute(user_message, context)
+                
+                # Yield progress update
+                yield {
+                    "type": "agent_progress",
+                    "agent": agent_type.value,
+                    "update": response.content[:300] + "..." if len(response.content) > 300 else response.content
+                }
+                
+                # Store summary for final context
+                agent_summaries.append({
+                    "agent": agent_type.value,
+                    "summary": response.content
+                })
+                
+                # Mark complete
+                yield {
+                    "type": "agent_complete",
+                    "agent": agent_type.value,
+                    "summary": response.content[:500] if len(response.content) > 500 else response.content,
+                    "order": agent_order
+                }
+                
+            except Exception as e:
+                yield {
+                    "type": "agent_error",
+                    "agent": agent_type.value,
+                    "error": str(e)
+                }
+        
+        # Build final context with agent results
+        final_context = self._build_agent_context(agent_summaries, user_message, chat_history)
+        
+        # Stream final response using main LLM
+        messages = [{"role": "system", "content": self._get_agentic_system_prompt(requested_tools or [])}]
+        
+        for msg in chat_history[-10:]:
+            messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
+            })
+        
+        # Add agent summaries as context
+        if agent_summaries:
+            context_str = "\n\n".join([
+                f"=== {s['agent'].upper()} AGENT ===\n{s['summary']}"
+                for s in agent_summaries
+            ])
+            messages.append({
+                "role": "system",
+                "content": f"Previous agent results:\n{context_str}\n\nSynthesize these results into a coherent response."
+            })
+        
+        messages.append({"role": "user", "content": user_message})
+        
+        # Stream the response
+        async for token in self.stream_async(messages, max_tokens):
+            yield {"type": "token", "content": token}
+        
+        yield {"type": "done"}
+    
+    def _build_entity_memory_dict(self, entity_memory: List[Dict]) -> Dict[str, List[str]]:
+        """Convert entity memory list to dict format"""
+        result = {
+            "tickers": [],
+            "strategies": [],
+            "papers": [],
+            "concepts": [],
+            "decisions": []
+        }
+        
+        for entity in entity_memory:
+            etype = entity.get("entity_type", "")
+            evalue = entity.get("entity_value", "")
+            
+            if etype == "ticker":
+                result["tickers"].append(evalue)
+            elif etype == "strategy":
+                result["strategies"].append(evalue)
+            elif etype == "paper":
+                result["papers"].append(evalue)
+            elif etype == "concept":
+                result["concepts"].append(evalue)
+            elif etype == "decision":
+                result["decisions"].append(evalue)
+        
+        return result
+    
+    def _get_agent_task_description(self, agent_type, query: str) -> str:
+        """Get human-readable task description for agent"""
+        from lib.agents.base import AgentType
+        
+        query_lower = query.lower()
+        
+        descriptions = {
+            AgentType.RESEARCH: "Searching academic papers and financial knowledge bases",
+            AgentType.ANALYSIS: "Analyzing company fundamentals and financial metrics",
+            AgentType.TRADING: "Designing and testing trading strategies",
+            AgentType.MARKET: "Fetching current market data and news"
+        }
+        
+        # Customize based on query
+        if agent_type == AgentType.RESEARCH:
+            if "paper" in query_lower or "research" in query_lower:
+                return "Finding relevant academic papers..."
+            elif "explain" in query_lower or "what is" in query_lower:
+                return "Explaining financial concepts..."
+        
+        elif agent_type == AgentType.ANALYSIS:
+            if "fundament" in query_lower:
+                return "Analyzing fundamentals..."
+            elif "valuation" in query_lower or "dcf" in query_lower:
+                return "Performing valuation analysis..."
+            elif "ratio" in query_lower:
+                return "Calculating financial ratios..."
+        
+        elif agent_type == AgentType.TRADING:
+            if "strategy" in query_lower:
+                return "Designing trading strategy..."
+            elif "backtest" in query_lower:
+                return "Running backtest..."
+        
+        elif agent_type == AgentType.MARKET:
+            if "price" in query_lower or "trading" in query_lower:
+                return "Fetching current prices..."
+            elif "news" in query_lower:
+                return "Getting latest news..."
+            elif "option" in query_lower:
+                return "Getting options data..."
+        
+        return descriptions.get(agent_type, "Processing request...")
+    
+    def _build_agent_context(
+        self,
+        agent_summaries: List[Dict],
+        user_message: str,
+        chat_history: List[Dict]
+    ) -> str:
+        """Build context string from agent summaries"""
+        if not agent_summaries:
+            return ""
+        
+        context_parts = ["## Agent Research Results\n"]
+        
+        for summary in agent_summaries:
+            context_parts.append(f"\n### {summary['agent'].title()} Agent\n")
+            context_parts.append(summary['summary'])
+        
+        return "\n".join(context_parts)

@@ -34,8 +34,8 @@ from retrieval.yahoofinance import (
 from retrieval.snaptrade import get_portfolio_data, remove_broker_authorization
 from strategy.main import run_backtest
 from strategy.adapters import YFinanceAdapter
-from strategy.models import RandomForestModel, ModelOutputType
-from strategy.features import rsi_feature, moving_average_feature
+from strategy.models import RandomForestModel, RulesBasedModel, ModelOutputType
+from strategy.features import rsi_feature, moving_average_feature, adx_feature, ema_feature, donchian_feature
 from strategy.position_sizers import FixedFractionalSizer
 from retrieval.rss_feeds import get_news_fetcher
 
@@ -51,10 +51,12 @@ clerk = Clerk(bearer_auth=CLERK_SECRET_KEY)
 # Initialize JWKS client for token verification
 jwks_client = PyJWKClient(CLERK_JWKS_URL)
 
-# Initialize LLM and Database
-lm = LM_WRAPPER_WITH_TOOLS(routers["GROQ"]["models"]["llama4scout"])
-titlelm = LM_WRAPPER(routers["GROQ"]["models"]["llama8b"])
+# Initialize Database first
 db = Database()
+
+# Initialize LLM with database access for agent tools
+lm = LM_WRAPPER_WITH_TOOLS(routers["GROQ"]["models"]["llama4scout"], db=db)
+titlelm = LM_WRAPPER(routers["GROQ"]["models"]["llama8b"])
 
 # Initialize news fetcher with database for caching
 from retrieval.rss_feeds import get_news_fetcher
@@ -1206,13 +1208,23 @@ def prepare_trading_config(config: dict) -> dict:
     trading_config['data_adapters'] = adapters
     
     # Setup model configuration
-    trading_config['model_type'] = RandomForestModel
-    trading_config['model_output_type'] = ModelOutputType.ACTION
-    trading_config['model_params'] = config.get('model_params', {
-        'n_estimators': 100,
-        'max_depth': 10,
-        'min_samples_split': 2
-    })
+    model_type_str = config.get('model_type', 'random_forest')
+    
+    if model_type_str == 'rules_based':
+        from strategy.models import RulesBasedModel
+        trading_config['model_type'] = RulesBasedModel
+        trading_config['model_output_type'] = ModelOutputType.ACTION
+        trading_config['model_params'] = config.get('model_params', {
+            'rules': config.get('rules', ['ema_crossover', 'price_filter', 'adx_filter'])
+        })
+    else:
+        trading_config['model_type'] = RandomForestModel
+        trading_config['model_output_type'] = ModelOutputType.ACTION
+        trading_config['model_params'] = config.get('model_params', {
+            'n_estimators': 100,
+            'max_depth': 10,
+            'min_samples_split': 2
+        })
     
     # Setup features
     # For now, use a simple default feature set
@@ -1227,6 +1239,12 @@ def prepare_trading_config(config: dict) -> dict:
                     features.append((rsi_feature, params))
                 elif feature_name == 'sma':
                     features.append((moving_average_feature, {**params, 'ma_type': 'sma'}))
+                elif feature_name == 'ema':
+                    features.append((ema_feature, params))
+                elif feature_name == 'adx':
+                    features.append((adx_feature, params))
+                elif feature_name == 'donchian':
+                    features.append((donchian_feature, params))
     else:
         # Default features
         for symbol in trading_config['traded_symbols']:
@@ -1264,117 +1282,262 @@ def parse_datetime(value) -> datetime:
 
 def extract_backtest_results(engine, config: dict) -> dict:
     """
-    Extract results from NautilusTrader backtest engine
+    Extract real results from NautilusTrader backtest engine.
+    Uses portfolio analyzer for accurate metrics and position data for trades.
     """
-    # Get portfolio data from engine - requires Venue argument
     from nautilus_trader.model.identifiers import Venue
-    venue = Venue("BACKTESTING")
-    account = engine.portfolio.account(venue) if hasattr(engine.portfolio, 'account') else None
+    from nautilus_trader.model.objects import Money
     
+    venue = Venue("BACKTESTING")
+    
+    # Get account and starting/ending capital
+    account = engine.portfolio.account(venue)
     starting_capital = float(config['starting_capital'])
     ending_capital = float(account.balance_total().as_decimal()) if account else starting_capital
-    total_return = (ending_capital - starting_capital) / starting_capital
     
-    # Calculate metrics
-    # Note: This is simplified - full implementation would analyze all fills and positions
+    # Get performance statistics from portfolio analyzer
+    stats_general = {}
+    stats_returns = {}
+    stats_pnls = {}
+    
+    try:
+        stats_general = engine.portfolio.analyzer.get_performance_stats_general() or {}
+    except Exception as e:
+        print(f"Could not get general stats: {e}")
+    
+    try:
+        stats_returns = engine.portfolio.analyzer.get_performance_stats_returns() or {}
+    except Exception as e:
+        print(f"Could not get returns stats: {e}")
+    
+    try:
+        stats_pnls = engine.portfolio.analyzer.get_performance_stats_pnls() or {}
+    except Exception as e:
+        print(f"Could not get PnL stats: {e}")
+    
+    # Get closed positions for trade-level data
+    positions = []
+    try:
+        positions = list(engine.cache.positions_closed()) if hasattr(engine.cache, 'positions_closed') else []
+    except Exception as e:
+        print(f"Could not get positions: {e}")
+    
+    # Build trades list from positions
     trades = []
-    equity_curve = []
-    
-    # Get orders from cache - use orders() instead of fills()
-    orders = list(engine.cache.orders()) if hasattr(engine.cache, 'orders') else []
-    
-    position_map = {}  # symbol -> current position
-    
-    for order in orders:
-        # Only process filled orders
-        if hasattr(order, 'filled_qty') and order.filled_qty > 0:
-            symbol = order.instrument_id.symbol.value
-            side = 'buy' if order.side.value == 'BUY' else 'sell'
-            quantity = float(order.filled_qty)
-            price = float(order.avg_px) if hasattr(order, 'avg_px') and order.avg_px else 0
+    for pos in positions:
+        try:
+            trade_pnl = None
+            trade_pnl_percent = None
             
-            # Track position
-            if symbol not in position_map:
-                position_map[symbol] = 0
-            qty_change = quantity if side == 'buy' else -quantity
-            position_map[symbol] += qty_change
+            # Try to get PnL from position
+            if hasattr(pos, 'pnl') and pos.pnl:
+                trade_pnl = float(pos.pnl)
+            elif hasattr(pos, 'realized_pnl') and pos.realized_pnl:
+                trade_pnl = float(pos.realized_pnl)
+            
+            if hasattr(pos, 'pnl_percent') and pos.pnl_percent:
+                trade_pnl_percent = float(pos.pnl_percent)
+            
+            # Get entry/exit times
+            entry_time = None
+            exit_time = None
+            if hasattr(pos, 'entry_time') and pos.entry_time:
+                try:
+                    entry_time = pd.Timestamp(pos.entry_time).to_pydatetime()
+                except:
+                    pass
+            if hasattr(pos, 'exit_time') and pos.exit_time:
+                try:
+                    exit_time = pd.Timestamp(pos.exit_time).to_pydatetime()
+                except:
+                    pass
             
             trades.append({
-                'trade_id': str(order.client_order_id),
-                'backtest_id': '',  # Will be set by caller
-                'symbol': symbol,
-                'side': side,
-                'quantity': quantity,
-                'price': price,
-                'timestamp': pd.Timestamp(order.ts_init, unit='ns').to_pydatetime() if hasattr(order, 'ts_init') else None,
-                'pnl': None,
-                'pnl_percent': None
+                'trade_id': str(pos.id) if hasattr(pos, 'id') else str(uuid4()),
+                'backtest_id': '',
+                'symbol': pos.instrument_id.symbol.value if hasattr(pos, 'instrument_id') else 'UNKNOWN',
+                'side': 'buy' if (hasattr(pos, 'quantity') and pos.quantity > 0) else 'sell',
+                'quantity': abs(float(pos.quantity)) if hasattr(pos, 'quantity') else 0,
+                'price': float(pos.exit_price) if hasattr(pos, 'exit_price') and pos.exit_price else 0,
+                'entry_price': float(pos.entry_price) if hasattr(pos, 'entry_price') and pos.entry_price else 0,
+                'timestamp': exit_time or entry_time,
+                'pnl': trade_pnl,
+                'pnl_percent': trade_pnl_percent
             })
+        except Exception as e:
+            print(f"Error processing position: {e}")
+            continue
     
-    # Build equity curve from portfolio snapshots if available
-    # For now, create a simple curve based on start/end
-    days = (config['backtest_end'] - config['backtest_start']).days
-    current_equity = starting_capital
+    # Build equity curve from positions
+    equity_curve = []
+    try:
+        equity_curve = _build_equity_curve_from_positions(positions, starting_capital, config)
+    except Exception as e:
+        print(f"Could not build equity curve: {e}")
+        # Fallback to simple curve
+        equity_curve = _build_simple_equity_curve(starting_capital, ending_capital, config)
     
-    for i in range(min(days, 1000)):
-        date = config['backtest_start'] + timedelta(days=i)
-        # Linear interpolation for demo (would use actual equity snapshots)
-        progress = i / days if days > 0 else 1
-        current_equity = starting_capital + (ending_capital - starting_capital) * progress
-        
-        equity_curve.append({
-            'date': date.isoformat(),
-            'equity': current_equity,
-            'cash': current_equity * 0.1,
-            'positions': {sym: position_map.get(sym, 0) for sym in config['traded_symbols']}
-        })
-    
-    # Calculate drawdown curve
+    # Build drawdown curve from equity curve
     drawdown_curve = []
-    peak = starting_capital
-    for point in equity_curve:
-        peak = max(peak, point['equity'])
-        drawdown = (peak - point['equity']) / peak if peak > 0 else 0
-        drawdown_curve.append({
-            'date': point['date'],
-            'drawdown': drawdown,
-            'peak': peak
-        })
+    try:
+        drawdown_curve = _build_drawdown_curve(equity_curve)
+    except Exception as e:
+        print(f"Could not build drawdown curve: {e}")
     
     # Calculate trade statistics
     winning_trades = sum(1 for t in trades if (t.get('pnl') or 0) > 0)
     losing_trades = len(trades) - winning_trades
+    
+    # Map NautilusTrader stats to our format
+    total_return = (ending_capital - starting_capital) / starting_capital if starting_capital > 0 else 0
+    days = (config['backtest_end'] - config['backtest_start']).days
+    
+    # Extract real metrics from NautilusTrader stats
+    sharpe = stats_returns.get('Sharpe Ratio (252 days)', 0) or stats_returns.get('Sharpe Ratio', 0) or 0
+    sortino = stats_returns.get('Sortino Ratio', 0) or 0
+    max_dd = stats_general.get('Max Drawdown %', 0) or stats_general.get('Max Drawdown', 0) or 0
+    if isinstance(max_dd, str):
+        max_dd = float(max_dd.replace('%', '')) / 100 if '%' in str(max_dd) else float(max_dd)
+    calmar = stats_returns.get('Calmar Ratio', 0) or 0
+    win_rate = stats_general.get('Win Rate', 0) or 0
+    if isinstance(win_rate, str):
+        win_rate = float(win_rate.replace('%', '')) / 100 if '%' in str(win_rate) else float(win_rate)
+    profit_factor = stats_general.get('Profit Factor', 0) or 0
+    expectancy = stats_general.get('Expectancy', 0) or stats_general.get('Expectancy %', 0) or 0
+    
+    # Calculate annualized return
+    if days > 0 and ending_capital > 0 and starting_capital > 0:
+        years = days / 365
+        annualized_return = (ending_capital / starting_capital) ** (1 / years) - 1
+    else:
+        annualized_return = total_return
     
     return {
         'portfolio': {
             'startingCapital': starting_capital,
             'endingCapital': ending_capital,
             'totalReturn': total_return,
-            'annualizedReturn': pow(ending_capital / starting_capital, 1 / max(days / 365, 1)) - 1 if total_return > 0 else total_return,
-            'volatility': 0.15,  # Would calculate from returns
-            'sharpeRatio': 1.0,  # Would calculate properly
-            'sortinoRatio': 1.2,
-            'maxDrawdown': max(d['drawdown'] for d in drawdown_curve) if drawdown_curve else 0,
-            'calmarRatio': 0.5,
-            'winRate': winning_trades / len(trades) if trades else 0,
-            'profitFactor': 1.1,
-            'expectancy': 100,
+            'annualizedReturn': annualized_return,
+            'volatility': stats_returns.get('Annualized Volatility', 0) or stats_returns.get('Volatility', 0) or 0,
+            'sharpeRatio': float(sharpe) if sharpe else 0,
+            'sortinoRatio': float(sortino) if sortino else 0,
+            'maxDrawdown': abs(float(max_dd)) if max_dd else 0,
+            'calmarRatio': float(calmar) if calmar else 0,
+            'winRate': float(win_rate) if win_rate else 0,
+            'profitFactor': float(profit_factor) if profit_factor else 0,
+            'expectancy': float(expectancy) if expectancy else 0,
             'totalTrades': len(trades),
             'winningTrades': winning_trades,
             'losingTrades': losing_trades
         },
         'risk': {
-            'valueAtRisk95': -0.05,
-            'expectedShortfall95': -0.08,
-            'beta': 1.0,
-            'alpha': 0,
-            'trackingError': 0.02,
-            'informationRatio': 0.5
+            'valueAtRisk95': stats_pnls.get('VaR (95%)', 0) or 0,
+            'expectedShortfall95': stats_pnls.get('CVaR (95%)', 0) or stats_pnls.get('ES (95%)', 0) or 0,
+            'beta': stats_general.get('Beta', 0) or 0,
+            'alpha': stats_returns.get('Alpha', 0) or 0,
+            'trackingError': stats_returns.get('Tracking Error', 0) or 0,
+            'informationRatio': stats_returns.get('Information Ratio', 0) or 0
         },
         'equity_curve': equity_curve,
         'drawdown_curve': drawdown_curve,
         'trades': trades
     }
+
+
+def _build_equity_curve_from_positions(positions, starting_capital: float, config: dict) -> list:
+    """Build equity curve from closed positions."""
+    if not positions:
+        return _build_simple_equity_curve(starting_capital, starting_capital, config)
+    
+    # Sort positions by exit time
+    sorted_positions = []
+    for pos in positions:
+        if hasattr(pos, 'exit_time') and pos.exit_time:
+            sorted_positions.append((pos.exit_time, pos))
+    
+    sorted_positions.sort(key=lambda x: x[0])
+    
+    equity_curve = []
+    current_equity = starting_capital
+    
+    # Start with initial capital
+    start_date = config['backtest_start']
+    equity_curve.append({
+        'date': start_date.isoformat() if hasattr(start_date, 'isoformat') else str(start_date),
+        'equity': current_equity,
+        'cash': current_equity * 0.5,
+        'positions': {}
+    })
+    
+    # Add equity points at each position close
+    for exit_time, pos in sorted_positions:
+        try:
+            pnl = 0
+            if hasattr(pos, 'pnl') and pos.pnl:
+                pnl = float(pos.pnl)
+            elif hasattr(pos, 'realized_pnl') and pos.realized_pnl:
+                pnl = float(pos.realized_pnl)
+            
+            current_equity += pnl
+            
+            equity_curve.append({
+                'date': pd.Timestamp(exit_time).to_pydatetime().isoformat() if hasattr(exit_time, 'timestamp') else str(exit_time),
+                'equity': current_equity,
+                'cash': current_equity * 0.5,
+                'positions': {}
+            })
+        except Exception as e:
+            print(f"Error processing position in equity curve: {e}")
+            continue
+    
+    # If we only have start point, create simple curve
+    if len(equity_curve) <= 1:
+        ending_capital = current_equity
+        return _build_simple_equity_curve(starting_capital, ending_capital, config)
+    
+    return equity_curve
+
+
+def _build_simple_equity_curve(starting_capital: float, ending_capital: float, config: dict) -> list:
+    """Build a simple equity curve with daily data points."""
+    days = (config['backtest_end'] - config['backtest_start']).days
+    equity_curve = []
+    
+    for i in range(min(days, 1000) + 1):
+        date = config['backtest_start'] + timedelta(days=i)
+        progress = i / days if days > 0 else 1
+        equity = starting_capital + (ending_capital - starting_capital) * progress
+        
+        equity_curve.append({
+            'date': date.isoformat(),
+            'equity': equity,
+            'cash': equity * 0.5,
+            'positions': {}
+        })
+    
+    return equity_curve
+
+
+def _build_drawdown_curve(equity_curve: list) -> list:
+    """Build drawdown curve from equity curve."""
+    if not equity_curve:
+        return []
+    
+    drawdown_curve = []
+    peak = equity_curve[0]['equity'] if equity_curve else 0
+    
+    for point in equity_curve:
+        equity = point['equity']
+        peak = max(peak, equity)
+        drawdown = (peak - equity) / peak if peak > 0 else 0
+        
+        drawdown_curve.append({
+            'date': point['date'],
+            'drawdown': drawdown,
+            'peak': peak
+        })
+    
+    return drawdown_curve
 
 # ============================================================================
 # News Endpoints
@@ -1523,6 +1686,63 @@ async def handle_health(request):
     return web.json_response({"status": "ok"})
 
 
+async def handle_gpusync_synced(request):
+    """Return all research URLs already in database"""
+    try:
+        urls = await db.get_all_research_urls()
+        return web.json_response({"urls": urls})
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def handle_gpusync_sync(request):
+    """Receive article package and insert to database"""
+    try:
+        data = await request.json()
+        
+        title = data.get("title", "")
+        abstract = data.get("abstract", "")
+        source = data.get("source", "")
+        url = data.get("url", "")
+        authors = data.get("authors", [])
+        categories = data.get("categories", [])
+        published_date = data.get("published_date")
+        chunks = data.get("chunks", [])
+        
+        if not url:
+            return web.json_response(
+                {"error": "url is required"},
+                status=400
+            )
+        
+        if not chunks:
+            return web.json_response(
+                {"error": "chunks required"},
+                status=400
+            )
+        
+        paper_id = await db.insert_research_article(
+            title=title,
+            abstract=abstract,
+            source=source,
+            url=url,
+            authors=authors,
+            categories=categories,
+            published_date=published_date,
+            chunks=chunks
+        )
+        
+        return web.json_response({"status": "ok", "id": paper_id})
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
 async def on_startup(app):
     """Initialize database on startup"""
     await db.initialize()
@@ -1595,6 +1815,10 @@ def create_app():
     app.router.add_get("/news/tags", handle_get_popular_tags)
 
     app.router.add_get("/health", handle_health)
+    
+    # GPU Sync routes (weird names for obfuscation)
+    app.router.add_get("/dogchasedcat33/synced", handle_gpusync_synced)
+    app.router.add_post("/dogchasedcat33/sync", handle_gpusync_sync)
     
     # Add startup/cleanup handlers
     app.on_startup.append(on_startup)

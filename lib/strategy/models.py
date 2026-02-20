@@ -6,7 +6,7 @@ All models must implement this standardized API for pluggability.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 import pickle
@@ -77,6 +77,11 @@ class BaseModel(ABC):
         self.is_trained = False
         self.model_params = kwargs
         self._internal_state: Optional[Any] = None
+    
+    @property
+    def needs_training(self) -> bool:
+        """Override this property to return False for models that don't require training."""
+        return True
     
     @abstractmethod
     def train(self, X: np.ndarray, y: Optional[np.ndarray] = None, 
@@ -244,3 +249,159 @@ class RandomForestModel(BaseModel):
                           np.where(returns < -threshold, 0, 1))
         
         return targets
+
+
+class RulesBasedModel(BaseModel):
+    """
+    Rules-based trend following model with no ML training.
+    Evaluates predefined technical analysis rules on features.
+    """
+    
+    def __init__(self, output_type: ModelOutputType = ModelOutputType.ACTION,
+                 rules: Optional[List[str]] = None, **kwargs):
+        super().__init__(output_type=output_type, **kwargs)
+        self.feature_names: List[str] = []
+        self.rules = rules or ['ema_crossover', 'price_filter', 'adx_filter']
+        self.is_trained = True
+    
+    @property
+    def needs_training(self) -> bool:
+        return False
+    
+    def train(self, X: np.ndarray, y: Optional[np.ndarray] = None,
+              metadata: Optional[Dict[str, Any]] = None):
+        pass
+    
+    def predict(self, X: np.ndarray, symbol: Optional[str] = None) -> SignalOutput:
+        if len(self.feature_names) == 0:
+            return SignalOutput(self.output_type, TradingAction.HOLD, 0.5)
+        
+        features = dict(zip(self.feature_names, X[0]))
+        return self._evaluate_rules(features, symbol)
+    
+    def _evaluate_rules(self, features: dict, symbol: Optional[str]) -> SignalOutput:
+        """Evaluate all rules and aggregate signals via majority vote."""
+        signals = []
+        
+        for rule in self.rules:
+            signal = self._evaluate_single_rule(rule, features, symbol)
+            signals.append(signal)
+        
+        buy_votes = sum(1 for s in signals if s == TradingAction.BUY)
+        sell_votes = sum(1 for s in signals if s == TradingAction.SELL)
+        
+        if buy_votes > sell_votes and buy_votes >= len(signals) // 2 + 1:
+            confidence = buy_votes / len(signals)
+            return SignalOutput(self.output_type, TradingAction.BUY, confidence, confidence)
+        elif sell_votes > buy_votes and sell_votes >= len(signals) // 2 + 1:
+            confidence = sell_votes / len(signals)
+            return SignalOutput(self.output_type, TradingAction.SELL, confidence, confidence)
+        
+        return SignalOutput(self.output_type, TradingAction.HOLD, 0.5)
+    
+    def _evaluate_single_rule(self, rule: str, features: dict, symbol: Optional[str]) -> TradingAction:
+        """Evaluate a single rule and return trading action."""
+        symbol_prefix = f"_{symbol}" if symbol else ""
+        
+        if rule == 'ema_crossover':
+            return self._rule_ema_crossover(features, symbol)
+        elif rule == 'price_filter':
+            return self._rule_price_filter(features, symbol)
+        elif rule == 'adx_filter':
+            return self._rule_adx_filter(features, symbol)
+        elif rule == 'donchian_breakout':
+            return self._rule_donchian_breakout(features, symbol)
+        
+        return TradingAction.HOLD
+    
+    def _rule_ema_crossover(self, features: dict, symbol: Optional[str]) -> TradingAction:
+        """EMA fast > EMA slow = BUY, reverse = SELL."""
+        fast_key = self._find_key(features, 'ema', '9')
+        slow_key = self._find_key(features, 'ema', '21')
+        
+        if not fast_key or not slow_key:
+            return TradingAction.HOLD
+        
+        fast_val = features.get(fast_key, 0)
+        slow_val = features.get(slow_key, 0)
+        
+        if fast_val > slow_val:
+            return TradingAction.BUY
+        elif fast_val < slow_val:
+            return TradingAction.SELL
+        return TradingAction.HOLD
+    
+    def _rule_price_filter(self, features: dict, symbol: Optional[str]) -> TradingAction:
+        """Price > SMA(50) = BUY, Price < SMA(50) = SELL."""
+        sma_key = self._find_key(features, 'sma', '50')
+        
+        if not sma_key:
+            return TradingAction.HOLD
+        
+        close_key = self._find_key(features, 'close')
+        if not close_key:
+            return TradingAction.HOLD
+        
+        price = features.get(close_key, 0)
+        sma_val = features.get(sma_key, 0)
+        
+        if price > sma_val:
+            return TradingAction.BUY
+        elif price < sma_val:
+            return TradingAction.SELL
+        return TradingAction.HOLD
+    
+    def _rule_adx_filter(self, features: dict, symbol: Optional[str]) -> TradingAction:
+        """ADX > 25 with +DI > -DI = BUY, ADX > 25 with -DI > +DI = SELL."""
+        adx_key = self._find_key(features, 'adx')
+        plus_di_key = self._find_key(features, 'plus_di')
+        minus_di_key = self._find_key(features, 'minus_di')
+        
+        if not adx_key or not plus_di_key or not minus_di_key:
+            return TradingAction.HOLD
+        
+        adx = features.get(adx_key, 0)
+        plus_di = features.get(plus_di_key, 0)
+        minus_di = features.get(minus_di_key, 0)
+        
+        if adx > 25:
+            if plus_di > minus_di:
+                return TradingAction.BUY
+            elif minus_di > plus_di:
+                return TradingAction.SELL
+        
+        return TradingAction.HOLD
+    
+    def _rule_donchian_breakout(self, features: dict, symbol: Optional[str]) -> TradingAction:
+        """Price > 20-day high = BUY, Price < 20-day low = SELL."""
+        high_key = self._find_key(features, 'high', '20')
+        low_key = self._find_key(features, 'low', '20')
+        close_key = self._find_key(features, 'close')
+        
+        if not high_key or not low_key or not close_key:
+            return TradingAction.HOLD
+        
+        price = features.get(close_key, 0)
+        high_val = features.get(high_key, 0)
+        low_val = features.get(low_key, 0)
+        
+        if price > high_val:
+            return TradingAction.BUY
+        elif price < low_val:
+            return TradingAction.SELL
+        return TradingAction.HOLD
+    
+    def _find_key(self, features: dict, prefix: str, suffix: str = None) -> Optional[str]:
+        """Find a feature key by prefix and optional suffix."""
+        for key in features.keys():
+            key_lower = key.lower()
+            if key_lower.startswith(prefix) or prefix in key_lower:
+                if suffix is None or suffix in key_lower:
+                    return key
+        return None
+    
+    def save_state(self, path: str):
+        pass
+    
+    def load_state(self, path: str):
+        pass

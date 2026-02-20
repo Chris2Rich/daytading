@@ -207,6 +207,148 @@ class Database:
                 ON article_tags(tag)
             """)
 
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_papers (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    title TEXT NOT NULL,
+                    abstract TEXT,
+                    source TEXT NOT NULL CHECK (source IN ('arxiv', 'wikipedia')),
+                    url TEXT UNIQUE,
+                    authors TEXT[],
+                    categories TEXT[],
+                    published_date DATE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_chunks (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    paper_id UUID REFERENCES research_papers(id) ON DELETE CASCADE,
+                    chunk_text TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    embedding vector(1024),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_research_chunks_embedding 
+                ON research_chunks 
+                USING hnsw (embedding vector_cosine_ops)
+                WITH (m = 16, ef_construction = 64)
+            """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS context_summaries (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    chat_id UUID NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+                    turn_start INTEGER NOT NULL,
+                    turn_end INTEGER NOT NULL,
+                    summary_text TEXT NOT NULL,
+                    key_entities JSONB DEFAULT '{}',
+                    token_count INTEGER,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_context_summaries_chat_id 
+                ON context_summaries(chat_id, turn_start)
+            """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS entity_memory (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    chat_id UUID NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+                    entity_type TEXT NOT NULL CHECK (entity_type IN ('ticker', 'strategy', 'paper', 'concept', 'decision')),
+                    entity_value TEXT NOT NULL,
+                    context JSONB DEFAULT '{}',
+                    first_mentioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_mentioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    mention_count INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(chat_id, entity_type, entity_value)
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_entity_memory_chat_id 
+                ON entity_memory(chat_id)
+            """)
+
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_papers (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    title TEXT NOT NULL,
+                    abstract TEXT,
+                    source TEXT NOT NULL CHECK (source IN ('arxiv', 'wikipedia')),
+                    url TEXT UNIQUE,
+                    authors TEXT[],
+                    categories TEXT[],
+                    published_date DATE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_chunks (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    paper_id UUID REFERENCES research_papers(id) ON DELETE CASCADE,
+                    chunk_text TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    embedding vector(1024),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_research_chunks_embedding 
+                ON research_chunks 
+                USING hnsw (embedding vector_cosine_ops)
+                WITH (m = 16, ef_construction = 64)
+            """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS context_summaries (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    chat_id UUID NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+                    turn_start INTEGER NOT NULL,
+                    turn_end INTEGER NOT NULL,
+                    summary_text TEXT NOT NULL,
+                    key_entities JSONB DEFAULT '{}',
+                    token_count INTEGER,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_context_summaries_chat_id 
+                ON context_summaries(chat_id, turn_start)
+            """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS entity_memory (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    chat_id UUID NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+                    entity_type TEXT NOT NULL CHECK (entity_type IN ('ticker', 'strategy', 'paper', 'concept', 'decision')),
+                    entity_value TEXT NOT NULL,
+                    context JSONB DEFAULT '{}',
+                    first_mentioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_mentioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    mention_count INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(chat_id, entity_type, entity_value)
+                )
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_entity_memory_chat_id 
+                ON entity_memory(chat_id)
+            """)
+
     async def ensure_user(self, clerk_user_id: str):
         """Create user if doesn't exist"""
         async with self.pool.acquire() as conn:
@@ -990,3 +1132,261 @@ class Database:
             """, backtest_id, clerk_user_id, limit, offset)
             
             return [dict(row) for row in rows]
+
+    # ============================================================================
+    # Research Papers & Vector Search Methods
+    # ============================================================================
+
+    async def insert_research_paper(
+        self,
+        title: str,
+        source: str,
+        abstract: Optional[str] = None,
+        url: Optional[str] = None,
+        authors: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
+        published_date: Optional[datetime] = None
+    ) -> str:
+        """Insert a research paper and return its ID"""
+        paper_id = str(uuid.uuid4())
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO research_papers (id, title, abstract, source, url, authors, categories, published_date)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (url) DO UPDATE SET title = EXCLUDED.title
+            """, paper_id, title, abstract, source, url, authors, categories, published_date)
+        return paper_id
+
+    async def insert_research_chunk(
+        self,
+        paper_id: str,
+        chunk_text: str,
+        chunk_index: int,
+        embedding: List[float]
+    ) -> str:
+        """Insert a research chunk with embedding"""
+        chunk_id = str(uuid.uuid4())
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO research_chunks (id, paper_id, chunk_text, chunk_index, embedding)
+                VALUES ($1, $2, $3, $4, $5)
+            """, chunk_id, paper_id, chunk_text, chunk_index, embedding)
+        return chunk_id
+
+    async def search_research_chunks(
+        self,
+        query_embedding: List[float],
+        limit: int = 10,
+        source_filter: Optional[str] = None,
+        category_filter: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Search research chunks by vector similarity"""
+        async with self.pool.acquire() as conn:
+            if source_filter and category_filter:
+                rows = await conn.fetch("""
+                    SELECT rc.chunk_text, rc.chunk_index, rc.id as chunk_id,
+                           rp.title, rp.abstract, rp.source, rp.url, rp.authors, rp.categories, rp.published_date,
+                           (rc.embedding <=> $1) as distance
+                    FROM research_chunks rc
+                    JOIN research_papers rp ON rc.paper_id = rp.id
+                    WHERE rp.source = $2 AND $3 = ANY(rp.categories)
+                    ORDER BY rc.embedding <=> $1
+                    LIMIT $4
+                """, query_embedding, source_filter, category_filter, limit)
+            elif source_filter:
+                rows = await conn.fetch("""
+                    SELECT rc.chunk_text, rc.chunk_index, rc.id as chunk_id,
+                           rp.title, rp.abstract, rp.source, rp.url, rp.authors, rp.categories, rp.published_date,
+                           (rc.embedding <=> $1) as distance
+                    FROM research_chunks rc
+                    JOIN research_papers rp ON rc.paper_id = rp.id
+                    WHERE rp.source = $2
+                    ORDER BY rc.embedding <=> $1
+                    LIMIT $3
+                """, query_embedding, source_filter, limit)
+            elif category_filter:
+                rows = await conn.fetch("""
+                    SELECT rc.chunk_text, rc.chunk_index, rc.id as chunk_id,
+                           rp.title, rp.abstract, rp.source, rp.url, rp.authors, rp.categories, rp.published_date,
+                           (rc.embedding <=> $1) as distance
+                    FROM research_chunks rc
+                    JOIN research_papers rp ON rc.paper_id = rp.id
+                    WHERE $2 = ANY(rp.categories)
+                    ORDER BY rc.embedding <=> $1
+                    LIMIT $3
+                """, query_embedding, category_filter, limit)
+            else:
+                rows = await conn.fetch("""
+                    SELECT rc.chunk_text, rc.chunk_index, rc.id as chunk_id,
+                           rp.title, rp.abstract, rp.source, rp.url, rp.authors, rp.categories, rp.published_date,
+                           (rc.embedding <=> $1) as distance
+                    FROM research_chunks rc
+                    JOIN research_papers rp ON rc.paper_id = rp.id
+                    ORDER BY rc.embedding <=> $1
+                    LIMIT $2
+                """, query_embedding, limit)
+            
+            return [dict(row) for row in rows]
+
+    async def get_research_paper_by_url(self, url: str) -> Optional[Dict[str, Any]]:
+        """Get a research paper by URL"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT id, title, abstract, source, url, authors, categories, published_date
+                FROM research_papers WHERE url = $1
+            """, url)
+            return dict(row) if row else None
+
+    async def get_all_research_urls(self) -> List[str]:
+        """Get all URLs in research_papers table"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT url FROM research_papers WHERE url IS NOT NULL
+            """)
+            return [row['url'] for row in rows]
+
+    async def insert_research_article(
+        self,
+        title: str,
+        abstract: str,
+        source: str,
+        url: str,
+        authors: List[str],
+        categories: List[str],
+        published_date: Optional[datetime],
+        chunks: List[Dict[str, Any]]
+    ) -> str:
+        """
+        Insert article and its chunks in a single transaction.
+        chunks: [{"text": str, "embedding": List[float]}]
+        """
+        paper_id = str(uuid.uuid4())
+        
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("""
+                    INSERT INTO research_papers (id, title, abstract, source, url, authors, categories, published_date)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (url) DO UPDATE SET title = EXCLUDED.title
+                """, paper_id, title, abstract, source, url, authors, categories, published_date)
+                
+                for i, chunk in enumerate(chunks):
+                    await conn.execute("""
+                        INSERT INTO research_chunks (id, paper_id, chunk_text, chunk_index, embedding)
+                        VALUES ($1, $2, $3, $4, $5)
+                    """, str(uuid.uuid4()), paper_id, chunk['text'], i, chunk['embedding'])
+        
+        return paper_id
+
+    # ============================================================================
+    # Context Summary Methods
+    # ============================================================================
+
+    async def save_context_summary(
+        self,
+        chat_id: str,
+        turn_start: int,
+        turn_end: int,
+        summary_text: str,
+        key_entities: Dict[str, Any],
+        token_count: int
+    ) -> str:
+        """Save a context summary for a chat turn range"""
+        summary_id = str(uuid.uuid4())
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO context_summaries (id, chat_id, turn_start, turn_end, summary_text, key_entities, token_count)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """, summary_id, chat_id, turn_start, turn_end, summary_text, json.dumps(key_entities), token_count)
+        return summary_id
+
+    async def get_context_summaries(self, chat_id: str) -> List[Dict[str, Any]]:
+        """Get all context summaries for a chat"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, chat_id, turn_start, turn_end, summary_text, key_entities, token_count, created_at
+                FROM context_summaries
+                WHERE chat_id = $1
+                ORDER BY turn_start ASC
+            """, chat_id)
+            results = []
+            for row in rows:
+                result = dict(row)
+                result['key_entities'] = json.loads(result['key_entities']) if result['key_entities'] else {}
+                results.append(result)
+            return results
+
+    async def delete_old_context_summaries(self, chat_id: str, keep_from_turn: int) -> int:
+        """Delete context summaries older than a certain turn"""
+        async with self.pool.acquire() as conn:
+            result = await conn.execute("""
+                DELETE FROM context_summaries
+                WHERE chat_id = $1 AND turn_end < $2
+            """, chat_id, keep_from_turn)
+            if "DELETE" in result:
+                return int(result.split()[-1])
+            return 0
+
+    # ============================================================================
+    # Entity Memory Methods
+    # ============================================================================
+
+    async def upsert_entity_memory(
+        self,
+        chat_id: str,
+        entity_type: str,
+        entity_value: str,
+        context: Dict[str, Any] = None
+    ) -> None:
+        """Insert or update an entity in memory"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO entity_memory (chat_id, entity_type, entity_value, context)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (chat_id, entity_type, entity_value) DO UPDATE SET
+                    last_mentioned_at = NOW(),
+                    mention_count = entity_memory.mention_count + 1,
+                    context = EXCLUDED.context
+            """, chat_id, entity_type, entity_value, json.dumps(context) if context else json.dumps({}))
+
+    async def get_entity_memory(self, chat_id: str, entity_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get entity memories for a chat"""
+        async with self.pool.acquire() as conn:
+            if entity_type:
+                rows = await conn.fetch("""
+                    SELECT id, chat_id, entity_type, entity_value, context, 
+                           first_mentioned_at, last_mentioned_at, mention_count
+                    FROM entity_memory
+                    WHERE chat_id = $1 AND entity_type = $2
+                    ORDER BY mention_count DESC
+                """, chat_id, entity_type)
+            else:
+                rows = await conn.fetch("""
+                    SELECT id, chat_id, entity_type, entity_value, context,
+                           first_mentioned_at, last_mentioned_at, mention_count
+                    FROM entity_memory
+                    WHERE chat_id = $1
+                    ORDER BY last_mentioned_at DESC
+                """, chat_id)
+            
+            results = []
+            for row in rows:
+                result = dict(row)
+                result['context'] = json.loads(result['context']) if result['context'] else {}
+                results.append(result)
+            return results
+
+    async def delete_entity_memory(self, chat_id: str, entity_type: Optional[str] = None) -> int:
+        """Delete entity memories"""
+        async with self.pool.acquire() as conn:
+            if entity_type:
+                result = await conn.execute("""
+                    DELETE FROM entity_memory WHERE chat_id = $1 AND entity_type = $2
+                """, chat_id, entity_type)
+            else:
+                result = await conn.execute("""
+                    DELETE FROM entity_memory WHERE chat_id = $1
+                """, chat_id)
+            if "DELETE" in result:
+                return int(result.split()[-1])
+            return 0
