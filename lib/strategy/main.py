@@ -656,7 +656,7 @@ def run_backtest(config_dict: Dict[str, Any]) -> BacktestEngine:
     config = TradingSystemConfig(config_dict)
     
     # Initialize backtest engine
-    engine = BacktestEngine(config=BacktestEngineConfig())
+    engine = BacktestEngine(config=BacktestEngineConfig(log_level="ERROR"))
 
     engine.add_venue(
     venue=Venue("BACKTESTING"),
