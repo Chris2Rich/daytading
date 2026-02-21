@@ -207,8 +207,6 @@ class Database:
                 ON article_tags(tag)
             """)
 
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS research_papers (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -277,8 +275,6 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_entity_memory_chat_id 
                 ON entity_memory(chat_id)
             """)
-
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS research_papers (

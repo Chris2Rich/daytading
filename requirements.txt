@@ -3,7 +3,7 @@ bs4
 dspy
 fredapi
 markdownify
-numpy
+numpy==1.26.4
 pandas
 requests
 yfinance
