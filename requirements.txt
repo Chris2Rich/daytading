@@ -14,6 +14,3 @@ snaptrade-python-sdk
 lightgbm
 nautilus_trader
 scikit-learn
-torch
-tiktoken
-sentence-transformers

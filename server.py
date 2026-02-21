@@ -1686,63 +1686,6 @@ async def handle_health(request):
     return web.json_response({"status": "ok"})
 
 
-async def handle_gpusync_synced(request):
-    """Return all research URLs already in database"""
-    try:
-        urls = await db.get_all_research_urls()
-        return web.json_response({"urls": urls})
-    except Exception as e:
-        return web.json_response(
-            {"error": str(e)},
-            status=500
-        )
-
-
-async def handle_gpusync_sync(request):
-    """Receive article package and insert to database"""
-    try:
-        data = await request.json()
-        
-        title = data.get("title", "")
-        abstract = data.get("abstract", "")
-        source = data.get("source", "")
-        url = data.get("url", "")
-        authors = data.get("authors", [])
-        categories = data.get("categories", [])
-        published_date = data.get("published_date")
-        chunks = data.get("chunks", [])
-        
-        if not url:
-            return web.json_response(
-                {"error": "url is required"},
-                status=400
-            )
-        
-        if not chunks:
-            return web.json_response(
-                {"error": "chunks required"},
-                status=400
-            )
-        
-        paper_id = await db.insert_research_article(
-            title=title,
-            abstract=abstract,
-            source=source,
-            url=url,
-            authors=authors,
-            categories=categories,
-            published_date=published_date,
-            chunks=chunks
-        )
-        
-        return web.json_response({"status": "ok", "id": paper_id})
-    except Exception as e:
-        return web.json_response(
-            {"error": str(e)},
-            status=500
-        )
-
-
 async def on_startup(app):
     """Initialize database on startup"""
     await db.initialize()
@@ -1815,10 +1758,6 @@ def create_app():
     app.router.add_get("/news/tags", handle_get_popular_tags)
 
     app.router.add_get("/health", handle_health)
-    
-    # GPU Sync routes (weird names for obfuscation)
-    app.router.add_get("/dogchasedcat33/synced", handle_gpusync_synced)
-    app.router.add_post("/dogchasedcat33/sync", handle_gpusync_sync)
     
     # Add startup/cleanup handlers
     app.on_startup.append(on_startup)
