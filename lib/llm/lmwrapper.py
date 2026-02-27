@@ -1141,7 +1141,19 @@ class LM_WRAPPER_WITH_AGENTS(LM_WRAPPER_WITH_TOOLS):
         - token: Text tokens
         - done: Generation complete
         """
-        from lib.agents.base import AgentContext
+        from lib.agents.base import AgentContext, AgentType
+        
+        # Compute enabled_tools based on requested_tools
+        available_tools = [
+            "web_search",
+            "get_market_data",
+            "get_portfolio",
+            "research_agent",
+            "analysis_agent",
+            "trading_agent",
+            "market_agent"
+        ]
+        enabled_tools = [t for t in available_tools if t in (requested_tools or []) or t == "web_search"]
         
         # Build context for agents
         entity_memory = []
@@ -1167,6 +1179,24 @@ class LM_WRAPPER_WITH_AGENTS(LM_WRAPPER_WITH_TOOLS):
         
         # Classify intent
         agent_types = self.orchestrator.classify_intent(user_message)
+        
+        # Filter agent_types based on enabled_tools
+        agent_type_to_tool = {
+            AgentType.RESEARCH: "research_agent",
+            AgentType.ANALYSIS: "analysis_agent",
+            AgentType.TRADING: "trading_agent",
+            AgentType.MARKET: "market_agent",
+        }
+        agent_types = [
+            at for at in agent_types 
+            if agent_type_to_tool.get(at) in enabled_tools
+        ]
+        
+        # If no agents remain after filtering, return early
+        if not agent_types:
+            yield {"type": "token", "content": "The requested research tools are not enabled. Please enable them in the tools menu to get research results."}
+            yield {"type": "done"}
+            return
         
         yield {
             "type": "agent_routing",
