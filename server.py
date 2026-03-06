@@ -41,7 +41,7 @@ from retrieval.rss_feeds import get_news_fetcher
 
 # Clerk configuration
 CLERK_SECRET_KEY = os.environ.get("CLERK_SECRET_KEY")
-CLERK_JWKS_URL = "https://artistic-hedgehog-31.clerk.accounts.dev/.well-known/jwks.json"
+CLERK_JWKS_URL = "https://clerk.zecant.com/.well-known/jwks.json"
 if not CLERK_SECRET_KEY:
     raise ValueError("CLERK_SECRET_KEY environment variable is required")
 
