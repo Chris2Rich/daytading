@@ -1009,6 +1009,12 @@ MATH FORMATTING:
                                     if "choices" in chunk and len(chunk["choices"]) > 0:
                                         delta = chunk["choices"][0].get("delta", {})
                                         
+                                        # Extract reasoning/thinking from OpenRouter models (DeepSeek R1, etc.)
+                                        # OpenRouter returns reasoning in different fields depending on the model
+                                        reasoning = delta.get("reasoning") or delta.get("thought") or ""
+                                        if reasoning:
+                                            yield {"type": "thinking", "content": reasoning}
+                                        
                                         if "tool_calls" in delta:
                                             for tc in delta["tool_calls"]:
                                                 if tc.get("function", {}).get("name"):
